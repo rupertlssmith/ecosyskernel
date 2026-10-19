@@ -1,4 +1,4 @@
-module System.Process exposing
+module ChildProcess exposing
     ( RunOptions, defaultRunOptions, Shell(..), WorkingDirectory(..), EnvironmentVariables(..), RunDuration(..)
     , run, SuccessfulRun, FailedRun(..)
     , spawn, SpawnOptions, StreamIO, Connection(..), defaultSpawnOptions
@@ -28,13 +28,10 @@ function can be called directly.
 
 import Bytes exposing (Bytes)
 import Dict exposing (Dict)
+import Platform
 import Process
 import Stream
 import Task exposing (Task)
-
-
-
--- OPTIONS
 
 
 {-| Options to customize the execution of a child process created with [`run`](#run).
@@ -44,7 +41,8 @@ import Task exposing (Task)
   - `environmentVariables` specifies the environment variables the process has access to.
   - `maximumBytesWrittenToStreams` is an upper bound on the number of bytes the process may write
     to each of stdout and stderr. A process that writes more is terminated with `SIGTERM` and the
-    run fails with a `ProgramError` whose `exitCode` is `-1`, holding the output collected so far.
+    run fails with a `ProgramError` whose `exitCode` is `-1`, holding the output collected so far
+    (truncated at the limit). A value of `0` or less means no limit.
   - `runDuration` specifies a maximum amount of time the process is allowed to run before it is
     terminated.
 
@@ -163,19 +161,16 @@ type alias SuccessfulRun =
 
 {-| Execute a program with the given name, arguments and options, and wait for it to terminate.
 
-    System.Process.run "cat" [ "my_file" ] System.Process.defaultRunOptions
+    ChildProcess.run "cat" [ "my_file" ] ChildProcess.defaultRunOptions
 
 The task succeeds if the program exits with code 0, and fails with a [`FailedRun`](#FailedRun)
-otherwise.
+otherwise. The program's standard input is empty (`/dev/null`). Killing the task with
+`Process.kill` terminates the program with `SIGTERM`.
 
 -}
 run : String -> List String -> RunOptions -> Task FailedRun SuccessfulRun
-run program arguments options =
+run =
     Debug.todo "Implement System API"
-
-
-
--- SPAWN
 
 
 {-| Options to customize the execution of a child process created with [`spawn`](#spawn).
@@ -201,13 +196,14 @@ type alias SpawnOptions msg =
     }
 
 
-{-| Streams that can be used to communicate with a spawned child process: `input` is connected to
-the child's stdin, `output` to its stdout and `error` to its stderr.
+{-| Streams that can be used to communicate with a spawned child process: `stdin` is connected to
+the child's standard input, `stdout` to its standard output and `stderr` to its standard error.
+(Named `input`, `output` and `error` in gren-node.)
 -}
 type alias StreamIO =
-    { input : Stream.Writable Bytes
-    , output : Stream.Readable Bytes
-    , error : Stream.Readable Bytes
+    { stdin : Stream.Writable Bytes
+    , stdout : Stream.Readable Bytes
+    , stderr : Stream.Readable Bytes
     }
 
 
@@ -237,19 +233,21 @@ the exit message: the default shell, the inherited working directory and environ
 and no time limit.
 -}
 defaultSpawnOptions : Connection msg -> (Int -> msg) -> SpawnOptions msg
-defaultSpawnOptions connection onExit =
+defaultSpawnOptions =
     Debug.todo "Implement System API"
 
 
 {-| Spawn a program with the given name, arguments and options, and let it run in the
 background. This is mostly helpful for starting long-running processes.
 
-    System.Process.spawn "tail" [ "-f", "my_file" ] mySpawnOptions
+    ChildProcess.spawn "tail" [ "-f", "my_file" ] mySpawnOptions
 
 You receive the `connection` message once the process has started, and the `onExit` message
-when it terminates.
+when it terminates. If the program cannot be started at all, you still receive the `connection`
+message, immediately followed by `onExit` with a negative exit code: minus the number of the
+system error (`-2` when the program does not exist), as in Node.
 
 -}
 spawn : String -> List String -> SpawnOptions msg -> Cmd msg
-spawn program arguments options =
+spawn =
     Debug.todo "Implement System API"

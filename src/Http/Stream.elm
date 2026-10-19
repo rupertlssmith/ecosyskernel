@@ -51,14 +51,11 @@ Differences from elm/http:
 -}
 
 import Bytes exposing (Bytes)
+import Dict exposing (Dict)
 import Http
 import Json.Encode
 import Stream
 import Task exposing (Task)
-
-
-
--- REQUESTS
 
 
 {-| Create a custom request whose response body is a stream. For example, to download a large
@@ -96,20 +93,14 @@ request :
     , timeout : Maybe Float
     }
     -> Cmd msg
-request r =
+request =
     Debug.todo "Implement System API"
-
-
-
--- BODY
 
 
 {-| Represents the body of a request made with this module.
 -}
 type Body
-    = EmptyBody
-    | BytesBody String Bytes
-    | StreamBody String Int
+    = Body
 
 
 {-| Create an empty body for your request. This is useful for GET requests and POST requests
@@ -127,7 +118,7 @@ is sent as the `Content-Type` header. Some servers are strict about this!
 
 -}
 stringBody : String -> String -> Body
-stringBody mimeType value =
+stringBody =
     Debug.todo "Implement System API"
 
 
@@ -135,7 +126,7 @@ stringBody mimeType value =
 `Content-Type: application/json` header.
 -}
 jsonBody : Json.Encode.Value -> Body
-jsonBody value =
+jsonBody =
     Debug.todo "Implement System API"
 
 
@@ -151,7 +142,7 @@ The first argument is a [MIME type](https://en.wikipedia.org/wiki/Media_type) of
 
 -}
 bytesBody : String -> Bytes -> Body
-bytesBody mimeType bytes =
+bytesBody =
     Debug.todo "Implement System API"
 
 
@@ -175,19 +166,15 @@ chunked transfer encoding. If the stream is cancelled, the request fails with a 
 
 -}
 streamBody : String -> Stream.Readable Bytes -> Body
-streamBody mimeType stream =
+streamBody =
     Debug.todo "Implement System API"
-
-
-
--- EXPECT
 
 
 {-| Logic for interpreting a response body, as with elm/http's `Http.Expect`. Here the body is
 always delivered as a stream.
 -}
 type Expect msg
-    = Expect Bool (Http.Response (Stream.Readable Bytes) -> msg)
+    = Expect
 
 
 {-| Expect the response body as a readable stream of bytes, together with the response
@@ -202,7 +189,7 @@ Read the body to the end, or cancel it with `Stream.cancelReadable` when you no 
 
 -}
 expectStream : (Result Http.Error ( Http.Metadata, Stream.Readable Bytes ) -> msg) -> Expect msg
-expectStream toMsg =
+expectStream =
     Debug.todo "Implement System API"
 
 
@@ -214,12 +201,8 @@ comes with its real body stream, so you can read the error body of, say, a 404 r
 
 -}
 expectStreamResponse : (Result x a -> msg) -> (Http.Response (Stream.Readable Bytes) -> Result x a) -> Expect msg
-expectStreamResponse toMsg toResult =
+expectStreamResponse =
     Debug.todo "Implement System API"
-
-
-
--- TASKS
 
 
 {-| Just like [`request`](#request), but it creates a `Task`. This makes it possible to chain
@@ -238,7 +221,7 @@ task :
     , timeout : Maybe Float
     }
     -> Task x a
-task r =
+task =
     Debug.todo "Implement System API"
 
 
@@ -246,7 +229,7 @@ task r =
 [`streamResolver`](#streamResolver).
 -}
 type Resolver x a
-    = Resolver (Http.Response (Stream.Readable Bytes) -> Result x a)
+    = Resolver
 
 
 {-| Turn a response with a stream body into a result. Similar to
@@ -254,5 +237,5 @@ type Resolver x a
 stream.
 -}
 streamResolver : (Http.Response (Stream.Readable Bytes) -> Result x a) -> Resolver x a
-streamResolver toResult =
+streamResolver =
     Debug.todo "Implement System API"

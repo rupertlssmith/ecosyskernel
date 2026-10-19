@@ -1,6 +1,6 @@
-module System.Terminal exposing
-    ( Configuration, Size, getConfiguration
-    , setStdInRawMode, setProcessTitle
+module Terminal exposing
+    ( Configuration, Size, configuration
+    , setStdinRawMode, setTitle
     , onResize
     )
 
@@ -8,18 +8,18 @@ module System.Terminal exposing
 this application.
 
 Unlike gren-node's `Terminal` module there is no permission value and no `initialize`: call
-[`getConfiguration`](#getConfiguration) to find out whether a terminal is attached, and use the
+[`configuration`](#configuration) to find out whether a terminal is attached, and use the
 other functions directly.
 
 
 ## Configuration
 
-@docs Configuration, Size, getConfiguration
+@docs Configuration, Size, configuration
 
 
 ## Commands
 
-@docs setStdInRawMode, setProcessTitle
+@docs setStdinRawMode, setTitle
 
 
 ## Subscriptions
@@ -46,7 +46,7 @@ type alias Configuration =
     }
 
 
-{-| Size of a terminal. Handy to know for drawing a text-based UI.
+{-| Size of a terminal viewport. Handy to know for drawing a text-based UI.
 -}
 type alias Size =
     { columns : Int
@@ -63,8 +63,8 @@ This replaces gren-node's `Terminal.initialize`; it can be called at any time an
 you like.
 
 -}
-getConfiguration : Task x (Maybe Configuration)
-getConfiguration =
+configuration : Task x (Maybe Configuration)
+configuration =
     Debug.todo "Implement System API"
 
 
@@ -74,24 +74,33 @@ If you switch over to raw mode, every keypress will be sent over the stream, and
 combinations like `Ctrl-C` will no longer trigger the interrupt signal.
 
 Enable this when you need full control over how input is handled. The original terminal mode is
-restored when the program exits. This does nothing if stdin is not a terminal.
+restored when the program exits, also when it is ended by an interrupt (`SIGINT`) or terminate
+(`SIGTERM`) signal it does not subscribe to. This does nothing if stdin is not a terminal.
 
 -}
-setStdInRawMode : Bool -> Task x ()
-setStdInRawMode toggle =
+setStdinRawMode : Bool -> Task x ()
+setStdinRawMode =
     Debug.todo "Implement System API"
 
 
-{-| Set the title of the running process. This will usually display in activity monitors or in
-the title bar of your terminal emulator.
+{-| Set the title of the terminal window, as shown in the title bar or tab of your terminal
+emulator.
+
+This writes the standard title escape sequence (OSC 2) to stdout when stdout is a terminal, and
+does nothing otherwise, so the sequence never ends up in a redirected file or pipe. It works in
+xterm-compatible terminals on Linux and macOS, and in Windows Terminal.
+
+This was `setProcessTitle`, which changed the process name instead (on Linux only); POSIX has no
+portable process title.
+
 -}
-setProcessTitle : String -> Task x ()
-setProcessTitle title =
+setTitle : String -> Task x ()
+setTitle =
     Debug.todo "Implement System API"
 
 
 {-| A subscription that triggers every time the size of the terminal changes, with the new size.
 -}
 onResize : (Size -> msg) -> Sub msg
-onResize toMsg =
+onResize =
     Debug.todo "Implement System API"

@@ -1,14 +1,14 @@
-module System.File.Path exposing
+module Path exposing
     ( Path
     , empty, fromPosixString, toPosixString, fromWin32String, toWin32String
-    , filenameWithExtension, parentPath
+    , filenameWithExtension, parent
     , append, appendPosixString, appendWin32String, prepend, prependPosixString, prependWin32String, join
     )
 
 {-| A path represents the location of a file or directory in a file system.
 
 This module is pure Elm: building, printing and combining paths never touches the file system,
-so it behaves the same on every platform. Use the functions in [System.File](System-File) to act
+so it behaves the same on every platform. Use the functions in [FileSystem](FileSystem) to act
 on the entity a path points at.
 
 @docs Path
@@ -21,7 +21,7 @@ on the entity a path points at.
 
 ## Query
 
-@docs filenameWithExtension, parentPath
+@docs filenameWithExtension, parent
 
 
 ## Manipulation
@@ -29,6 +29,8 @@ on the entity a path points at.
 @docs append, appendPosixString, appendWin32String, prepend, prependPosixString, prependWin32String, join
 
 -}
+
+
 
 
 {-| A cross-platform representation of a file system path.
@@ -64,9 +66,13 @@ empty =
 The string is normalized first, so `"a/../b"` gives a path whose filename is `b`, repeated
 separators are collapsed, and a trailing separator is ignored. `""` and `"."` give [empty](#empty).
 
+Only `/` is a separator. A leading `./` is kept as a `"."` directory entry, so `"./a"` prints
+back as `"./a"`. The extension is everything after the last dot of the final segment, unless that
+dot starts the segment (`".bashrc"` has no extension).
+
 -}
 fromPosixString : String -> Path
-fromPosixString str =
+fromPosixString =
     Debug.todo "Implement System API"
 
 
@@ -77,7 +83,7 @@ printed as `"/"`.
 
 -}
 toPosixString : Path -> String
-toPosixString path =
+toPosixString =
     Debug.todo "Implement System API"
 
 
@@ -85,16 +91,23 @@ toPosixString path =
 
 Both `\` and `/` are accepted as separators, and a drive such as `C:` becomes the `root`.
 
+The string is normalized as Windows does: `"C:foo\bar.txt"` has root `C:`, a UNC prefix such as
+`\\server\share\` becomes the root, and a relative path that Windows could mistake for a drive or
+a reserved device name (`CON`, `NUL`, `COM1` ...) gets a `"."` first directory entry.
+
 -}
 fromWin32String : String -> Path
-fromWin32String str =
+fromWin32String =
     Debug.todo "Implement System API"
 
 
 {-| `String` representation of a [Path](#Path) for Windows, using `\` as the separator.
+
+The [empty](#empty) path prints as `"."`.
+
 -}
 toWin32String : Path -> String
-toWin32String path =
+toWin32String =
     Debug.todo "Implement System API"
 
 
@@ -107,7 +120,7 @@ toWin32String path =
 
 -}
 filenameWithExtension : Path -> String
-filenameWithExtension path =
+filenameWithExtension =
     Debug.todo "Implement System API"
 
 
@@ -115,14 +128,14 @@ filenameWithExtension path =
 
     "/home/me/file.md"
         |> fromPosixString
-        |> parentPath
+        |> parent
         -- returns (Just "/home/me")
 
 Returns `Nothing` for the [empty](#empty) path and for a path that consists of only a root.
 
 -}
-parentPath : Path -> Maybe Path
-parentPath path =
+parent : Path -> Maybe Path
+parent =
     Debug.todo "Implement System API"
 
 
@@ -133,7 +146,7 @@ parentPath path =
 
 -}
 append : Path -> Path -> Path
-append left right =
+append =
     Debug.todo "Implement System API"
 
 
@@ -141,7 +154,7 @@ append left right =
 appending it.
 -}
 appendPosixString : String -> Path -> Path
-appendPosixString str path =
+appendPosixString =
     Debug.todo "Implement System API"
 
 
@@ -149,7 +162,7 @@ appendPosixString str path =
 appending it.
 -}
 appendWin32String : String -> Path -> Path
-appendWin32String str path =
+appendWin32String =
     Debug.todo "Implement System API"
 
 
@@ -161,7 +174,7 @@ second path.
 
 -}
 prepend : Path -> Path -> Path
-prepend left right =
+prepend =
     Debug.todo "Implement System API"
 
 
@@ -169,7 +182,7 @@ prepend left right =
 prepending it.
 -}
 prependPosixString : String -> Path -> Path
-prependPosixString str path =
+prependPosixString =
     Debug.todo "Implement System API"
 
 
@@ -177,12 +190,15 @@ prependPosixString str path =
 prepending it.
 -}
 prependWin32String : String -> Path -> Path
-prependWin32String str path =
+prependWin32String =
     Debug.todo "Implement System API"
 
 
 {-| Join all paths in a `List`, from first to last. An empty `List` gives [empty](#empty).
+
+The result keeps the root of the first path.
+
 -}
 join : List Path -> Path
-join paths =
+join =
     Debug.todo "Implement System API"

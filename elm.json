@@ -7,15 +7,22 @@
     "exposed-modules": [
         "System",
         "Stream",
-        "Stream.Log",
-        "System.File",
-        "System.File.Path",
-        "System.File.FileHandle",
-        "System.Process",
-        "System.Terminal",
+        "Stream.Transformation",
+        "FileSystem",
+        "FileSystem.Handle",
+        "Path",
+        "ChildProcess",
+        "Terminal",
+        "Socket",
+        "Socket.Address",
+        "Socket.Tcp",
+        "Socket.Unix",
+        "Socket.Udp",
+        "Socket.Tls",
+        "WebSocket",
         "Http.Server",
-        "Http.Server.Response",
-        "Http.Stream"
+        "Http.Stream",
+        "Html.Dom"
     ],
     "elm-version": "0.19.0 <= v < 0.20.0",
     "dependencies": {
@@ -24,7 +31,8 @@
         "elm/http": "2.0.0 <= v < 3.0.0",
         "elm/json": "1.1.3 <= v < 2.0.0",
         "elm/time": "1.0.0 <= v < 2.0.0",
-        "elm/url": "1.0.0 <= v < 2.0.0"
+        "elm/url": "1.0.0 <= v < 2.0.0",
+        "elm/virtual-dom": "1.0.0 <= v < 2.0.0"
     },
     "test-dependencies": {}
 }

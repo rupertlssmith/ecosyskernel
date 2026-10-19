@@ -1,9 +1,9 @@
 module Stream exposing
-    ( Readable, fromList, read, readBytesAsString, readUntilClosed, cancelReadable
-    , Writable, write, writeStringAsBytes, writeLineAsBytes, enqueue, closeWritable, cancelWritable
+    ( Readable, fromList, read, readString, readLine, readUntilClosed, cancelReadable
+    , Writable, write, writeString, writeLine, enqueue, closeWritable, cancelWritable
+    , log, logString, logLine
     , Error(..), errorToString
-    , Transformation, identityTransformation, identityTransformationWithOptions, nullTransformation, CustomTransformationAction(..), customTransformation, customTransformationWithOptions, readable, writable, pipeThrough, awaitAndPipeThrough, pipeTo
-    , textEncoder, textDecoder, gzipCompression, deflateCompression, deflateRawCompression, gzipDecompression, deflateDecompression, deflateRawDecompression
+    , Transformation, pipeThrough, awaitAndPipeThrough, pipeTo
     )
 
 {-| When moving a lot of data out of and into memory, it's rare for the entire chunk of data to
@@ -21,22 +21,28 @@ Streams are the abstraction that allows us to work on data that is in transit. T
 serve as a tool for communication between different parts of your code base.
 
 We have three kinds of streams: readable streams, writable streams, and transformation streams.
+Transformations are built with [`Stream.Transformation`](Stream-Transformation).
 
-This module is a port of the `Stream` module of gren-lang/core 7.5.0. The deliberate differences
-are: `fromArray` is called [`fromList`](#fromList); [`enqueue`](#enqueue) on a closed stream fails
-with `Cancelled` instead of producing an unhandled rejection; and
-[`customTransformationWithOptions`](#customTransformationWithOptions) never uses a write capacity
-below 1.
+This module is a port of the `Stream` module of gren-lang/core 7.5.0, together with gren's
+`Stream.Log`. The deliberate differences are: `fromArray` is called [`fromList`](#fromList);
+[`enqueue`](#enqueue) on a closed stream fails with `Cancelled` instead of producing an unhandled
+rejection; [`readLine`](#readLine) is new; the logging functions are part of this module and take
+the stream last, like [`write`](#write); and the transformations moved to their own module.
 
 
 # Readable Streams
 
-@docs Readable, fromList, read, readBytesAsString, readUntilClosed, cancelReadable
+@docs Readable, fromList, read, readString, readLine, readUntilClosed, cancelReadable
 
 
 # Writable Streams
 
-@docs Writable, write, writeStringAsBytes, writeLineAsBytes, enqueue, closeWritable, cancelWritable
+@docs Writable, write, writeString, writeLine, enqueue, closeWritable, cancelWritable
+
+
+# Logging
+
+@docs log, logString, logLine
 
 
 # Error Handling
@@ -46,28 +52,18 @@ below 1.
 
 # Transformation Streams
 
-@docs Transformation, identityTransformation, identityTransformationWithOptions, nullTransformation, CustomTransformationAction, customTransformation, customTransformationWithOptions, readable, writable, pipeThrough, awaitAndPipeThrough, pipeTo
-
-
-# Useful Transformation Streams
-
-@docs textEncoder, textDecoder, gzipCompression, deflateCompression, deflateRawCompression, gzipDecompression, deflateDecompression, deflateRawDecompression
+@docs Transformation, pipeThrough, awaitAndPipeThrough, pipeTo
 
 -}
 
 import Bytes exposing (Bytes)
-import Stream.Internal
 import Task exposing (Task)
-
-
-
--- READABLE
 
 
 {-| A source of data. You can only read data out of a `Readable` stream, not write data into it.
 -}
-type alias Readable value =
-    Stream.Internal.Readable value
+type Readable value
+    = Readable
 
 
 {-| Create a [`Readable`](#Readable) stream that delivers the values in the provided `List`, in
@@ -77,7 +73,7 @@ This was called `fromArray` in gren.
 
 -}
 fromList : List a -> Task Error (Readable a)
-fromList values =
+fromList =
     Debug.todo "Implement System API"
 
 
@@ -89,7 +85,7 @@ Only one read can wait on a stream at a time; a second concurrent read fails wit
 
 -}
 read : Readable value -> Task Error value
-read stream =
+read =
     Debug.todo "Implement System API"
 
 
@@ -98,11 +94,44 @@ valid UTF-8. If the conversion fails, the stream is cancelled and the `Task` fai
 `Cancelled`.
 
 Each call reads a single chunk. A multi-byte character split across two chunks will not convert;
-use [`textDecoder`](#textDecoder) when reading text from a byte stream in pieces.
+use [`readLine`](#readLine) for line-oriented text, or
+[`Stream.Transformation.textDecoder`](Stream-Transformation#textDecoder) when reading text from a
+byte stream in pieces.
+
+This was called `readBytesAsString`.
 
 -}
-readBytesAsString : Readable Bytes -> Task Error String
-readBytesAsString stream =
+readString : Readable Bytes -> Task Error String
+readString =
+    Debug.todo "Implement System API"
+
+
+{-| Read the next line off a byte stream: everything up to the next newline (`\n`), decoded as
+UTF-8, without the newline and without a carriage return (`\r`) just before it.
+
+    countLines : Readable Bytes -> Int -> Task Error Int
+    countLines stdin n =
+        Stream.readLine stdin
+            |> Task.andThen (\_ -> countLines stdin (n + 1))
+            |> Task.onError
+                (\err ->
+                    case err of
+                        Stream.Closed ->
+                            Task.succeed n
+
+                        _ ->
+                            Task.fail err
+                )
+
+A last line without a newline is returned as it is; after that the `Task` fails with `Closed`.
+Lines may be longer than the chunks the stream delivers. Bytes read past the newline are kept for
+the next read from the stream, so `readLine` can be mixed with [`read`](#read) and
+[`readString`](#readString). If a line is not valid UTF-8, the stream is cancelled and the `Task`
+fails with `Cancelled`.
+
+-}
+readLine : Readable Bytes -> Task Error String
+readLine =
     Debug.todo "Implement System API"
 
 
@@ -115,7 +144,7 @@ reason for the stream, and the `Task` fails with `Cancelled`.
 
 -}
 readUntilClosed : (a -> b -> Result String b) -> b -> Readable a -> Task Error b
-readUntilClosed stepFn initial stream =
+readUntilClosed =
     Debug.todo "Implement System API"
 
 
@@ -127,19 +156,15 @@ Writes into the other end of the stream fail with `Cancelled` and the given reas
 
 -}
 cancelReadable : String -> Readable value -> Task Error ()
-cancelReadable reason stream =
+cancelReadable =
     Debug.todo "Implement System API"
-
-
-
--- WRITABLE
 
 
 {-| A destination for data. You can only write data into a `Writable` stream, not read data out
 of it.
 -}
-type alias Writable value =
-    Stream.Internal.Writable value
+type Writable value
+    = Writable
 
 
 {-| Write a value into the stream. The returned `Task` only succeeds when the written value has
@@ -150,22 +175,28 @@ Writing to a closed stream fails with `Cancelled`.
 
 -}
 write : value -> Writable value -> Task Error (Writable value)
-write value stream =
+write =
     Debug.todo "Implement System API"
 
 
 {-| Convert the given `String` to UTF-8 `Bytes` and write it to the stream.
+
+This was called `writeStringAsBytes`.
+
 -}
-writeStringAsBytes : String -> Writable Bytes -> Task Error (Writable Bytes)
-writeStringAsBytes str stream =
+writeString : String -> Writable Bytes -> Task Error (Writable Bytes)
+writeString =
     Debug.todo "Implement System API"
 
 
-{-| Same as [`writeStringAsBytes`](#writeStringAsBytes) except a newline character is appended to
-the `String` before conversion.
+{-| Same as [`writeString`](#writeString) except a newline character is appended to the `String`
+before conversion.
+
+This was called `writeLineAsBytes`.
+
 -}
-writeLineAsBytes : String -> Writable Bytes -> Task Error (Writable Bytes)
-writeLineAsBytes str stream =
+writeLine : String -> Writable Bytes -> Task Error (Writable Bytes)
+writeLine =
     Debug.todo "Implement System API"
 
 
@@ -184,7 +215,7 @@ you experience problems.
 
 -}
 enqueue : value -> Writable value -> Task Error (Writable value)
-enqueue value stream =
+enqueue =
     Debug.todo "Implement System API"
 
 
@@ -196,7 +227,7 @@ Closing a stream that is already closed fails with `Cancelled`.
 
 -}
 closeWritable : Writable value -> Task Error ()
-closeWritable stream =
+closeWritable =
     Debug.todo "Implement System API"
 
 
@@ -208,12 +239,48 @@ fail with `Cancelled` and the given reason.
 
 -}
 cancelWritable : String -> Writable value -> Task Error ()
-cancelWritable reason stream =
+cancelWritable =
     Debug.todo "Implement System API"
 
 
+{-| Write `Bytes` to a byte stream on a best effort basis: the `Task` succeeds once the write has
+finished or failed, and any error is ignored.
 
--- ERROR
+We don't normally encourage ignoring errors in this way, but for the explicit purpose of logging
+it's not always clear how you would handle an error. If you cannot log an error message to the
+terminal, do you try again? Try again on another stream? What if that also fails? Only use the
+`log` functions if there is no sane way to handle a failed write.
+
+This was `Stream.Log.bytes`, which took the stream first.
+
+-}
+log : Bytes -> Writable Bytes -> Task x ()
+log =
+    Debug.todo "Implement System API"
+
+
+{-| Write a `String`, encoded as UTF-8, to a byte stream. Any error is ignored, as for
+[`log`](#log).
+
+This was `Stream.Log.string`, which took the stream first.
+
+-}
+logString : String -> Writable Bytes -> Task x ()
+logString =
+    Debug.todo "Implement System API"
+
+
+{-| Write a `String`, encoded as UTF-8, to a byte stream, followed by a newline character. Any
+error is ignored, as for [`log`](#log).
+
+    Stream.logLine "Hello, world!" env.stdout
+
+This was `Stream.Log.line`, which took the stream first.
+
+-}
+logLine : String -> Writable Bytes -> Task x ()
+logLine =
+    Debug.todo "Implement System API"
 
 
 {-| The different kinds of errors that can happen when operating on a stream.
@@ -234,113 +301,28 @@ type Error
 {-| Give a human readable description of an error.
 -}
 errorToString : Error -> String
-errorToString error =
+errorToString =
     Debug.todo "Implement System API"
-
-
-
--- TRANSFORMATION
 
 
 {-| A readable-writable stream pair. Whatever is written to the writable stream can be retrieved
 from the readable stream. After data is written, and before it is placed on the readable stream,
 it goes through a transformation function. This function can alter the data, or even drop it
 entirely.
--}
-type alias Transformation read write =
-    Stream.Internal.Transformation read write
 
+A `Transformation input output` accepts `input` values on its
+[`writable`](Stream-Transformation#writable) side and produces `output` values on its
+[`readable`](Stream-Transformation#readable) side;
+[`textEncoder`](Stream-Transformation#textEncoder), for example, is a
+`Transformation String Bytes`. (gren-lang/core's annotations of `readable` and `writable` had the
+two parameters the wrong way round.)
 
-{-| A [`Transformation`](#Transformation) that doesn't actually transform the data written to
-the writable stream. Both of its buffers hold a single value.
-
-This can be useful as a communication primitive. You can pass on the readable stream, allowing
-one-way communication with some other part of your code base.
-
--}
-identityTransformation : Task x (Transformation data data)
-identityTransformation =
-    Debug.todo "Implement System API"
-
-
-{-| Same as [`identityTransformation`](#identityTransformation), but allows you to set the
-capacity of the streams. The capacity decides how many chunks a stream will store in its buffer.
-When a buffer is full, the stream stops accepting new chunks until it has room. Capacities below
-1 are treated as 1.
-
-If you attempt to write to a [`Writable`](#Writable) stream with a full buffer, the write will only
-succeed when there's room in the buffer again. Reading from a [`Readable`](#Readable) stream with
-values in its buffer succeeds instantly; if the buffer is empty, the read succeeds once there's a
-value to be read.
+Transformations are created with the functions in
+[`Stream.Transformation`](Stream-Transformation), and used with [`pipeThrough`](#pipeThrough).
 
 -}
-identityTransformationWithOptions : { readCapacity : Int, writeCapacity : Int } -> Task x (Transformation data data)
-identityTransformationWithOptions options =
-    Debug.todo "Implement System API"
-
-
-{-| A [`Transformation`](#Transformation) that ignores all data written to it. The readable
-stream never outputs data, but is closed whenever the writable stream is closed.
--}
-nullTransformation : data -> Task x (Transformation data data)
-nullTransformation initialState =
-    Debug.todo "Implement System API"
-
-
-{-| When defining a custom [`Transformation`](#Transformation), you need to specify how the data
-coming in is handled.
-
-  - `UpdateState`: Update the internal state of the [`Transformation`](#Transformation); no values
-    are passed to the readable stream.
-  - `Send`: Update the internal state and make chunks available for reading.
-  - `Close`: Make the given chunks available for reading, and close the streams.
-  - `Cancel`: Cancel both streams with a human-readable error message.
-
--}
-type CustomTransformationAction state value
-    = UpdateState state
-    | Send { state : state, send : List value }
-    | Close (List value)
-    | Cancel String
-
-
-{-| Create your very own [`Transformation`](#Transformation). The stream pair holds state, and is
-free to alter, batch, combine or even drop whatever data is coming in. The function is called
-with the current state and each value written to the stream, and decides what happens next.
--}
-customTransformation : (state -> input -> CustomTransformationAction state output) -> state -> Task x (Transformation input output)
-customTransformation fn initialState =
-    Debug.todo "Implement System API"
-
-
-{-| Same as [`customTransformation`](#customTransformation), except you can define the capacity
-of each stream.
-
-A write capacity below 1 is treated as 1, and a read capacity below 0 as 0. A read capacity of 0
-means a value is only transformed once someone is waiting to read the result. (gren allowed a
-write capacity of 0, which made the stream unable to accept any value.)
-
--}
-customTransformationWithOptions :
-    (state -> input -> CustomTransformationAction state output)
-    -> { initialState : state, readCapacity : Int, writeCapacity : Int }
-    -> Task x (Transformation input output)
-customTransformationWithOptions fn options =
-    Debug.todo "Implement System API"
-
-
-{-| Retrieve the [`Readable`](#Readable) stream of a [`Transformation`](#Transformation).
--}
-readable : Transformation read write -> Readable read
-readable transformation =
-    Debug.todo "Implement System API"
-
-
-{-| Retrieve the [`Writable`](#Writable) stream of a [`Transformation`](#Transformation).
--}
-writable : Transformation read write -> Writable write
-writable transformation =
-    Debug.todo "Implement System API"
+type Transformation input output
+    = Transformation
 
 
 {-| When data becomes available on a [`Readable`](#Readable) stream, immediately write that data
@@ -352,15 +334,15 @@ returned. If either stream is already locked, the `Task` fails with `Locked`.
 
 -}
 pipeThrough : Transformation input output -> Readable input -> Task Error (Readable output)
-pipeThrough transformation source =
+pipeThrough =
     Debug.todo "Implement System API"
 
 
 {-| Same as [`pipeThrough`](#pipeThrough), except the [`Transformation`](#Transformation) is
-resolved from a `Task`, such as [`gzipDecompression`](#gzipDecompression).
+resolved from a `Task`, such as [`Stream.Transformation.gunzip`](Stream-Transformation#gunzip).
 -}
 awaitAndPipeThrough : Task Error (Transformation input output) -> Readable input -> Task Error (Readable output)
-awaitAndPipeThrough builder source =
+awaitAndPipeThrough =
     Debug.todo "Implement System API"
 
 
@@ -373,72 +355,5 @@ fails with `Cancelled`.
 
 -}
 pipeTo : Writable data -> Readable data -> Task Error ()
-pipeTo destination source =
-    Debug.todo "Implement System API"
-
-
-
--- BUILT-IN TRANSFORMATIONS
-
-
-{-| Transform each `String` into UTF-8 `Bytes`. Empty strings produce no output.
--}
-textEncoder : Task x (Transformation String Bytes)
-textEncoder =
-    Debug.todo "Implement System API"
-
-
-{-| Transform UTF-8 `Bytes` into `String`s. A multi-byte character split across two chunks is
-decoded correctly, and a leading byte order mark is removed.
-
-The decoder is lenient: invalid byte sequences are replaced by the replacement character
-U+FFFD rather than cancelling the streams. Chunks that decode to nothing produce no output.
-
--}
-textDecoder : Task x (Transformation Bytes String)
-textDecoder =
-    Debug.todo "Implement System API"
-
-
-{-| Compress `Bytes` using the `gzip` format.
--}
-gzipCompression : Task x (Transformation Bytes Bytes)
-gzipCompression =
-    Debug.todo "Implement System API"
-
-
-{-| Compress `Bytes` using the `deflate` algorithm, in the zlib format.
--}
-deflateCompression : Task x (Transformation Bytes Bytes)
-deflateCompression =
-    Debug.todo "Implement System API"
-
-
-{-| Compress `Bytes` using the `deflate` algorithm, without leading headers or a trailing
-checksum.
--}
-deflateRawCompression : Task x (Transformation Bytes Bytes)
-deflateRawCompression =
-    Debug.todo "Implement System API"
-
-
-{-| Decompress `Bytes` in the `gzip` format.
--}
-gzipDecompression : Task x (Transformation Bytes Bytes)
-gzipDecompression =
-    Debug.todo "Implement System API"
-
-
-{-| Decompress `Bytes` compressed with the `deflate` algorithm, in the zlib format.
--}
-deflateDecompression : Task x (Transformation Bytes Bytes)
-deflateDecompression =
-    Debug.todo "Implement System API"
-
-
-{-| Decompress `Bytes` compressed with the `deflate` algorithm, without leading headers or a
-trailing checksum.
--}
-deflateRawDecompression : Task x (Transformation Bytes Bytes)
-deflateRawDecompression =
+pipeTo =
     Debug.todo "Implement System API"

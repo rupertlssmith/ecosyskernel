@@ -1,46 +1,50 @@
 module System exposing
-    ( Program, ProgramConfiguration, defineProgram
-    , SimpleProgram, defineSimpleProgram, endSimpleProgram
-    , Environment, getEnvironmentVariables, Platform(..), getPlatform, CpuArchitecture(..), getCpuArchitecture
+    ( simpleProgram
+    , Environment, environmentVariables, Platform(..), CpuArchitecture(..)
     , exit, exitWithCode, setExitCode
     , onEmptyEventLoop, onSignalInterrupt, onSignalTerminate
     )
 
-{-| An Eco system program is defined much like an Elm `Platform.worker`, except that it is
-handed an [`Environment`](#Environment) when it starts. The environment tells you which
-platform you are running on, which arguments the program was invoked with, and gives you the
-standard input, output and error streams.
+{-| An Eco system program is an ordinary Elm `Platform.Program` whose flags are the
+[`Environment`](#Environment). Eco builds the environment when the program starts and hands it
+to `init`: it tells you which platform you are running on, which arguments the program was
+invoked with and when it started, and gives you the standard input, output and error streams.
 
 Long-lived programs that keep state, react to messages and listen to subscriptions are made
-with [`defineProgram`](#defineProgram). Short-lived programs that run a single task and then
-finish are made with [`defineSimpleProgram`](#defineSimpleProgram):
+with `Platform.worker`:
 
-    main : System.SimpleProgram msg
+    main : Platform.Program System.Environment Model Msg
     main =
-        System.defineSimpleProgram
-            (\env ->
-                System.endSimpleProgram
-                    (Stream.Log.line env.stdout "Hello, world!")
-            )
+        Platform.worker
+            { init = \env -> ( initialModel env, Cmd.none )
+            , update = update
+            , subscriptions = subscriptions
+            }
+
+Short-lived programs that run a single task and then finish are made with
+[`simpleProgram`](#simpleProgram):
+
+    main : Platform.Program System.Environment () ()
+    main =
+        System.simpleProgram
+            (\env -> Stream.logLine "Hello, world!" env.stdout)
+
+The flags type `System.Environment` is supplied by the Eco compiler and runtime; it cannot be
+passed in from JavaScript like ordinary JSON flags.
 
 This module is a port of the `Node` module of gren-node. Every subsystem (files, processes, the
 terminal, the HTTP server) can be used directly once the program has started; there is nothing
 to set up first.
 
 
-# Program
-
-@docs Program, ProgramConfiguration, defineProgram
-
-
 # Simple Program
 
-@docs SimpleProgram, defineSimpleProgram, endSimpleProgram
+@docs simpleProgram
 
 
 # Environment information
 
-@docs Environment, getEnvironmentVariables, Platform, getPlatform, CpuArchitecture, getCpuArchitecture
+@docs Environment, environmentVariables, Platform, CpuArchitecture
 
 
 # Exit
@@ -57,13 +61,11 @@ to set up first.
 import Bytes exposing (Bytes)
 import Dict exposing (Dict)
 import Platform
+import Path exposing (Path)
+import Process
 import Stream
-import System.File.Path exposing (Path)
 import Task exposing (Task)
-
-
-
--- ENVIRONMENT
+import Time
 
 
 {-| Contains information about the environment your application was started in.
@@ -75,8 +77,11 @@ import Task exposing (Task)
     first element, `args[0]`, is the program as it was invoked. This differs from gren-node,
     where the list starts with the path to the `node` binary followed by the script path, so a
     gren program that drops two leading arguments must drop only one here.
+  - `startTime` is the time the program started, read once at startup, so `init` doesn't need
+    to ask for the time first.
   - `stdout`, `stderr` and `stdin` are streams you can use to communicate with the outside
-    world. Take a closer look at the `Stream` module for more information.
+    world. Take a closer look at the `Stream` module for more information; `Stream.readLine`
+    reads standard input line by line.
 
 -}
 type alias Environment =
@@ -84,6 +89,7 @@ type alias Environment =
     , cpuArchitecture : CpuArchitecture
     , applicationPath : Path
     , args : List String
+    , startTime : Time.Posix
     , stdout : Stream.Writable Bytes
     , stderr : Stream.Writable Bytes
     , stdin : Stream.Readable Bytes
@@ -104,14 +110,6 @@ type Platform
     | UnknownPlatform String
 
 
-{-| Retrieve the platform of the computer running the application. The same value is
-available as `platform` in the [`Environment`](#Environment).
--}
-getPlatform : Task x Platform
-getPlatform =
-    Debug.todo "Implement System API"
-
-
 {-| The CPU architecture your application is running on. Architectures that are not
 recognised are reported as `UnknownArchitecture`, carrying the architecture's own name.
 -}
@@ -129,110 +127,39 @@ type CpuArchitecture
     | UnknownArchitecture String
 
 
-{-| Retrieve the CPU architecture of the computer running the application. The same value is
-available as `cpuArchitecture` in the [`Environment`](#Environment).
--}
-getCpuArchitecture : Task x CpuArchitecture
-getCpuArchitecture =
-    Debug.todo "Implement System API"
-
-
 {-| Get a `Dict` of the environment variables of the running process, mapping each variable
 name to its value.
 -}
-getEnvironmentVariables : Task x (Dict String String)
-getEnvironmentVariables =
+environmentVariables : Task x (Dict String String)
+environmentVariables =
     Debug.todo "Implement System API"
-
-
-
--- PROGRAMS
-
-
-{-| The definition of an Eco system program. Create one with
-[`defineProgram`](#defineProgram) or [`defineSimpleProgram`](#defineSimpleProgram).
-
-The program's flags are always `()`, and its model and messages are wrapped so that your own
-`init` only runs once the [`Environment`](#Environment) has been gathered.
-
--}
-type alias Program model msg =
-    Platform.Program () (Model model) (Msg model msg)
-
-
-type Model model
-    = Uninitialized
-    | Initialized model
-
-
-type Msg model msg
-    = InitDone ( model, Cmd msg )
-    | MsgReceived msg
-
-
-{-| The functions that define a program.
-
-  - `init` receives the [`Environment`](#Environment) and returns the initial model together
-    with a command to run.
-  - `update` and `subscriptions` work exactly as they do for `Platform.worker`.
-
-Subscriptions are not active until `init` has run.
-
--}
-type alias ProgramConfiguration model msg =
-    { init : Environment -> ( model, Cmd msg )
-    , update : msg -> model -> ( model, Cmd msg )
-    , subscriptions : model -> Sub msg
-    }
-
-
-{-| Define a program with access to long-lived state and the ability to respond to messages
-and listen to subscriptions. If you want to define a simple and short-lived program, chances
-are you're looking for [`defineSimpleProgram`](#defineSimpleProgram) instead.
-
-The program keeps running for as long as it has pending work or active subscriptions, or
-until it calls [`exit`](#exit) or [`exitWithCode`](#exitWithCode).
-
--}
-defineProgram : ProgramConfiguration model msg -> Program model msg
-defineProgram config =
-    Debug.todo "Implement System API"
-
-
-{-| A program that runs a single command and then finishes. It has no model of its own.
-
-This is `Program () msg`: a [`Program`](#Program) whose model is `()`. In gren-node a simple
-program had its own, unrelated program type.
-
--}
-type alias SimpleProgram msg =
-    Program () msg
 
 
 {-| Define a simple program that doesn't require long-lived state or the ability to respond to
 messages or subscriptions. Ideal for simple and short-lived programs.
 
-The function receives the [`Environment`](#Environment) and returns the command to run, which
-is usually built with [`endSimpleProgram`](#endSimpleProgram). Messages produced by that
-command are ignored.
+The function receives the [`Environment`](#Environment) and returns the task to run. The
+result of the task is ignored: the program ends once the task, and any IO it started, has
+completed. To end with a non-zero exit code, finish the task with
+[`setExitCode`](#setExitCode).
+
+    main : Platform.Program System.Environment () ()
+    main =
+        System.simpleProgram
+            (\env ->
+                case List.drop 1 env.args of
+                    [] ->
+                        Stream.logLine "usage: greet NAME" env.stderr
+                            |> Task.andThen (\_ -> System.setExitCode 2)
+
+                    name :: _ ->
+                        Stream.logLine ("Hello, " ++ name ++ "!") env.stdout
+            )
 
 -}
-defineSimpleProgram : (Environment -> Cmd msg) -> SimpleProgram msg
-defineSimpleProgram init =
+simpleProgram : (Environment -> Task Never a) -> Platform.Program Environment () ()
+simpleProgram =
     Debug.todo "Implement System API"
-
-
-{-| When defining a program with [`defineSimpleProgram`](#defineSimpleProgram), use this
-function to define the final task to execute. The result of the task is ignored; the program
-ends once the task, and any IO it started, has completed.
--}
-endSimpleProgram : Task Never a -> Cmd msg
-endSimpleProgram task =
-    Debug.todo "Implement System API"
-
-
-
--- EXIT
 
 
 {-| Terminate the program immediately. Buffered standard output is flushed, but the program
@@ -258,7 +185,7 @@ If all you want is to signal that your application exited due to an error, 1 is 
 
 -}
 exitWithCode : Int -> Cmd msg
-exitWithCode code =
+exitWithCode =
     Debug.todo "Implement System API"
 
 
@@ -269,12 +196,8 @@ system are allowed to complete. The program only exits once there is no ongoing 
 
 -}
 setExitCode : Int -> Task x ()
-setExitCode code =
+setExitCode =
     Debug.todo "Implement System API"
-
-
-
--- SUBSCRIPTIONS
 
 
 {-| Receive the given message when the program has run out of work: there are no queued
@@ -286,7 +209,7 @@ This subscription never fires when the program is embedded in a host application
 
 -}
 onEmptyEventLoop : msg -> Sub msg
-onEmptyEventLoop msg =
+onEmptyEventLoop =
     Debug.todo "Implement System API"
 
 
@@ -295,7 +218,7 @@ usually happens when the user presses Ctrl+C in the terminal. While subscribed, 
 longer terminates the program, so you are expected to exit yourself.
 -}
 onSignalInterrupt : msg -> Sub msg
-onSignalInterrupt msg =
+onSignalInterrupt =
     Debug.todo "Implement System API"
 
 
@@ -304,5 +227,5 @@ polite request to shut down sent by service managers and the `kill` command. Whi
 the signal no longer terminates the program, so you are expected to exit yourself.
 -}
 onSignalTerminate : msg -> Sub msg
-onSignalTerminate msg =
+onSignalTerminate =
     Debug.todo "Implement System API"

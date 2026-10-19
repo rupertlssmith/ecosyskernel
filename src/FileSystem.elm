@@ -1,21 +1,24 @@
-module System.File exposing
+module FileSystem exposing
     ( Metadata, EntityType(..), metadata, AccessPermission(..), checkAccess, changeAccess, accessPermissionsToInt, changeOwner, changeTimes, move, realPath
     , copyFile, appendToFile, readFile, ReadFileStreamMode(..), readFileStream, writeFile, WriteFileStreamMode(..), writeFileStream, truncateFile, remove
+    , WriteOptions, defaultWriteOptions, writeFileWith, writeFileStreamWith
     , listDirectory, makeDirectory, makeTempDirectory
     , hardLink, softLink, readLink, unlink
     , WatchEvent(..), watch, watchRecursive
-    , homeDirectory, currentWorkingDirectory, tmpDirectory, devNull
+    , homeDirectory, currentWorkingDirectory, tempDirectory, devNull
     , Error, errorPath, errorCode, errorToString
     , errorIsPermissionDenied, errorIsFileExists, errorIsDirectoryFound, errorIsTooManyOpenFiles, errorIsNoSuchFileOrDirectory, errorIsNotADirectory, errorIsDirectoryNotEmpty, errorIsNotPermitted, errorIsLinkLoop, errorIsPathTooLong, errorIsInvalidInput, errorIsIO
     )
 
 {-| This module provides access to the file system. It allows you to read and write files, create
-directories and links, and so on. Locations are given as a [Path](System-File-Path#Path).
+directories and links, and so on. Locations are given as a [Path](Path#Path).
 
-Every function that changes the file system succeeds with the [Path](System-File-Path#Path) it was
+Every function that changes the file system succeeds with the [Path](Path#Path) it was
 given, which makes it easy to chain operations on the same entity. If you know you are going to
-perform many operations on the same file, [System.File.FileHandle](System-File-FileHandle) can be
-more efficient.
+perform many operations on the same file, or need to read and write at arbitrary offsets,
+[FileSystem.Handle](FileSystem-Handle) can be more efficient. Writes that must reach the disk
+before you continue, and writes that must not replace an existing file, don't need handles: see
+[writeFileWith](#writeFileWith) and [writeFileStreamWith](#writeFileStreamWith).
 
 Unlike gren-node's `FileSystem` module, no permission value is needed to use these functions.
 
@@ -28,6 +31,11 @@ Unlike gren-node's `FileSystem` module, no permission value is needed to use the
 ## Files
 
 @docs copyFile, appendToFile, readFile, ReadFileStreamMode, readFileStream, writeFile, WriteFileStreamMode, writeFileStream, truncateFile, remove
+
+
+## Durable and exclusive writes
+
+@docs WriteOptions, defaultWriteOptions, writeFileWith, writeFileStreamWith
 
 
 ## Directories
@@ -47,7 +55,7 @@ Unlike gren-node's `FileSystem` module, no permission value is needed to use the
 
 ## Special paths
 
-@docs homeDirectory, currentWorkingDirectory, tmpDirectory, devNull
+@docs homeDirectory, currentWorkingDirectory, tempDirectory, devNull
 
 
 ## Errors
@@ -58,15 +66,11 @@ Unlike gren-node's `FileSystem` module, no permission value is needed to use the
 -}
 
 import Bytes exposing (Bytes)
+import Dict exposing (Dict)
+import Path exposing (Path)
 import Stream
-import System.File.Internal
-import System.File.Path exposing (Path)
 import Task exposing (Task)
 import Time
-
-
-
--- ERRORS
 
 
 {-| Represents an error that occurred when working with the file system.
@@ -76,8 +80,8 @@ operating system you're performing it on. To figure out which error it is, you'l
 to use one of the helper functions below, or check the specific error code.
 
 -}
-type alias Error =
-    System.File.Internal.Error
+type Error
+    = Error
 
 
 {-| The path where the error occurred.
@@ -87,7 +91,7 @@ is the **destination** path.
 
 -}
 errorPath : Error -> Path
-errorPath error =
+errorPath =
     Debug.todo "Implement System API"
 
 
@@ -99,14 +103,14 @@ reports `"ERR_FS_EISDIR"`, so [errorIsDirectoryFound](#errorIsDirectoryFound) is
 
 -}
 errorCode : Error -> String
-errorCode error =
+errorCode =
     Debug.todo "Implement System API"
 
 
 {-| Returns a human readable description of the error.
 -}
 errorToString : Error -> String
-errorToString error =
+errorToString =
     Debug.todo "Implement System API"
 
 
@@ -114,78 +118,78 @@ errorToString error =
 the operation.
 -}
 errorIsPermissionDenied : Error -> Bool
-errorIsPermissionDenied error =
+errorIsPermissionDenied =
     Debug.todo "Implement System API"
 
 
 {-| If `True`, a file exists when it was expected not to.
 -}
 errorIsFileExists : Error -> Bool
-errorIsFileExists error =
+errorIsFileExists =
     Debug.todo "Implement System API"
 
 
 {-| If `True`, a file operation was attempted on a directory.
 -}
 errorIsDirectoryFound : Error -> Bool
-errorIsDirectoryFound error =
+errorIsDirectoryFound =
     Debug.todo "Implement System API"
 
 
 {-| If `True`, the application has too many open files.
 -}
 errorIsTooManyOpenFiles : Error -> Bool
-errorIsTooManyOpenFiles error =
+errorIsTooManyOpenFiles =
     Debug.todo "Implement System API"
 
 
-{-| If `True`, the code was passed a [Path](System-File-Path#Path) which points to a file or
+{-| If `True`, the code was passed a [Path](Path#Path) which points to a file or
 directory that doesn't exist.
 -}
 errorIsNoSuchFileOrDirectory : Error -> Bool
-errorIsNoSuchFileOrDirectory error =
+errorIsNoSuchFileOrDirectory =
     Debug.todo "Implement System API"
 
 
 {-| If `True`, a directory was expected but it found a file or some other entity.
 -}
 errorIsNotADirectory : Error -> Bool
-errorIsNotADirectory error =
+errorIsNotADirectory =
     Debug.todo "Implement System API"
 
 
 {-| If `True`, the operation expected an empty directory, but the directory is not empty.
 -}
 errorIsDirectoryNotEmpty : Error -> Bool
-errorIsDirectoryNotEmpty error =
+errorIsDirectoryNotEmpty =
     Debug.todo "Implement System API"
 
 
 {-| If `True`, the operation was rejected because of missing privileges.
 -}
 errorIsNotPermitted : Error -> Bool
-errorIsNotPermitted error =
+errorIsNotPermitted =
     Debug.todo "Implement System API"
 
 
 {-| If `True`, we seem to be stuck in a loop following link after link after...
 -}
 errorIsLinkLoop : Error -> Bool
-errorIsLinkLoop error =
+errorIsLinkLoop =
     Debug.todo "Implement System API"
 
 
-{-| If `True`, the [Path](System-File-Path#Path) is too long.
+{-| If `True`, the [Path](Path#Path) is too long.
 -}
 errorIsPathTooLong : Error -> Bool
-errorIsPathTooLong error =
+errorIsPathTooLong =
     Debug.todo "Implement System API"
 
 
 {-| If `True`, the arguments passed to the function are invalid somehow.
 -}
 errorIsInvalidInput : Error -> Bool
-errorIsInvalidInput error =
+errorIsInvalidInput =
     Debug.todo "Implement System API"
 
 
@@ -193,12 +197,8 @@ errorIsInvalidInput error =
 busy, or even corrupt.
 -}
 errorIsIO : Error -> Bool
-errorIsIO error =
+errorIsIO =
     Debug.todo "Implement System API"
-
-
-
--- METADATA
 
 
 {-| Represents extra information about an entity in the file system.
@@ -233,14 +233,14 @@ type EntityType
     | Pipe
 
 
-{-| Return metadata for the entity represented by [Path](System-File-Path#Path).
+{-| Return metadata for the entity represented by [Path](Path#Path).
 
 If `resolveLink` is `False`, you will receive metadata for the link itself, not the entity
 pointed at by the link.
 
 -}
 metadata : { resolveLink : Bool } -> Path -> Task Error Metadata
-metadata options path =
+metadata =
     Debug.todo "Implement System API"
 
 
@@ -257,13 +257,13 @@ type AccessPermission
 
 
 {-| Check if the user running this application has the given access permissions for the
-entity represented by [Path](System-File-Path#Path).
+entity represented by [Path](Path#Path).
 
 Passing an empty `List` will check that the entity exists.
 
 -}
 checkAccess : List AccessPermission -> Path -> Task Error Path
-checkAccess permissions path =
+checkAccess =
     Debug.todo "Implement System API"
 
 
@@ -275,7 +275,7 @@ Each list is turned into one octal digit of the file mode with
 
 -}
 changeAccess : { owner : List AccessPermission, group : List AccessPermission, others : List AccessPermission } -> Path -> Task Error Path
-changeAccess permissions path =
+changeAccess =
     Debug.todo "Implement System API"
 
 
@@ -285,7 +285,7 @@ changeAccess permissions path =
 
 -}
 accessPermissionsToInt : List AccessPermission -> Int
-accessPermissionsToInt permissions =
+accessPermissionsToInt =
     Debug.todo "Implement System API"
 
 
@@ -298,7 +298,7 @@ not the entity it points to.
 
 -}
 changeOwner : { userID : Int, groupID : Int, resolveLink : Bool } -> Path -> Task Error Path
-changeOwner options path =
+changeOwner =
     Debug.todo "Implement System API"
 
 
@@ -310,12 +310,12 @@ itself, not the entity it points to.
 
 -}
 changeTimes : { lastAccessed : Time.Posix, lastModified : Time.Posix, resolveLink : Bool } -> Path -> Task Error Path
-changeTimes options path =
+changeTimes =
     Debug.todo "Implement System API"
 
 
-{-| Move the entity represented by the second [Path](System-File-Path#Path), to the location
-represented by the first [Path](System-File-Path#Path). This can also be used to rename an
+{-| Move the entity represented by the second [Path](Path#Path), to the location
+represented by the first [Path](Path#Path). This can also be used to rename an
 entity.
 
     move newPath oldPath
@@ -324,25 +324,21 @@ The task succeeds with the new path. If it fails, [errorPath](#errorPath) is the
 
 -}
 move : Path -> Path -> Task Error Path
-move newPath oldPath =
+move =
     Debug.todo "Implement System API"
 
 
-{-| If you have a [Path](System-File-Path#Path) that is relative to the current directory,
-or points at a link, you can use this to find the true [Path](System-File-Path#Path) of the
+{-| If you have a [Path](Path#Path) that is relative to the current directory,
+or points at a link, you can use this to find the true [Path](Path#Path) of the
 entity.
 -}
 realPath : Path -> Task Error Path
-realPath path =
+realPath =
     Debug.todo "Implement System API"
 
 
-
--- FILES
-
-
-{-| Copy the file represented by the second [Path](System-File-Path#Path), to the location
-represented by the first [Path](System-File-Path#Path).
+{-| Copy the file represented by the second [Path](Path#Path), to the location
+represented by the first [Path](Path#Path).
 
     copyFile destinationPath sourcePath
 
@@ -351,14 +347,14 @@ and if it fails, [errorPath](#errorPath) is the destination path.
 
 -}
 copyFile : Path -> Path -> Task Error Path
-copyFile destinationPath sourcePath =
+copyFile =
     Debug.todo "Implement System API"
 
 
 {-| Add `Bytes` to the end of a file. The file is created if it doesn't exist.
 -}
 appendToFile : Bytes -> Path -> Task Error Path
-appendToFile bytes path =
+appendToFile =
     Debug.todo "Implement System API"
 
 
@@ -370,7 +366,7 @@ to use [readFileStream](#readFileStream) instead.
 
 -}
 readFile : Path -> Task Error Bytes
-readFile path =
+readFile =
     Debug.todo "Implement System API"
 
 
@@ -396,15 +392,18 @@ itself, rather than being reported by the first read from the stream.
 
 -}
 readFileStream : ReadFileStreamMode -> Path -> Task Error (Stream.Readable Bytes)
-readFileStream mode path =
+readFileStream =
     Debug.todo "Implement System API"
 
 
 {-| Write the given `Bytes` into a file. The file will be created if it doesn't exist,
 and overwritten if it does.
+
+This is [writeFileWith](#writeFileWith) with [defaultWriteOptions](#defaultWriteOptions).
+
 -}
 writeFile : Bytes -> Path -> Task Error Path
-writeFile bytes path =
+writeFile =
     Debug.todo "Implement System API"
 
 
@@ -426,9 +425,56 @@ type WriteFileStreamMode
 
 
 {-| Create a writable stream backed by a file. Close the stream when you are done writing to it.
+
+This is [writeFileStreamWith](#writeFileStreamWith) with [defaultWriteOptions](#defaultWriteOptions).
+
 -}
 writeFileStream : WriteFileStreamMode -> Path -> Task Error (Stream.Writable Bytes)
-writeFileStream mode path =
+writeFileStream =
+    Debug.todo "Implement System API"
+
+
+{-| Options for [writeFileWith](#writeFileWith) and [writeFileStreamWith](#writeFileStreamWith).
+
+  - `createNew`: create the file, and fail with an error for which
+    [errorIsFileExists](#errorIsFileExists) is `True` if something already exists at the path
+    (`O_EXCL`). The check and the creation are one atomic step, which makes this the right tool
+    for lock files and for output that must never replace an existing file.
+  - `sync`: make sure the data has reached the storage device (`fsync`) before the write
+    succeeds. For [writeFileStreamWith](#writeFileStreamWith) this happens when the stream is
+    closed. Use it for data that must survive a crash, for example before renaming a temporary
+    file over the old one with [move](#move).
+
+-}
+type alias WriteOptions =
+    { createNew : Bool
+    , sync : Bool
+    }
+
+
+{-| Both options off: plain [writeFile](#writeFile) and [writeFileStream](#writeFileStream)
+behaviour.
+-}
+defaultWriteOptions : WriteOptions
+defaultWriteOptions =
+    Debug.todo "Implement System API"
+
+
+{-| Same as [writeFile](#writeFile), with [WriteOptions](#WriteOptions).
+
+    FileSystem.writeFileWith { defaultWriteOptions | createNew = True, sync = True } bytes path
+
+-}
+writeFileWith : WriteOptions -> Bytes -> Path -> Task Error Path
+writeFileWith =
+    Debug.todo "Implement System API"
+
+
+{-| Same as [writeFileStream](#writeFileStream), with [WriteOptions](#WriteOptions). With `sync`,
+closing the stream succeeds only once the data has reached the storage device.
+-}
+writeFileStreamWith : WriteOptions -> WriteFileStreamMode -> Path -> Task Error (Stream.Writable Bytes)
+writeFileStreamWith =
     Debug.todo "Implement System API"
 
 
@@ -437,7 +483,7 @@ the given length, zeroes are added to the file until it is the correct length. I
 is larger than the given length, the excess bytes are removed.
 -}
 truncateFile : Int -> Path -> Task Error Path
-truncateFile length path =
+truncateFile =
     Debug.todo "Implement System API"
 
 
@@ -449,50 +495,42 @@ Removing a directory with `recursive = False` fails with the error code `"ERR_FS
 
 -}
 remove : { recursive : Bool } -> Path -> Task Error Path
-remove options path =
+remove =
     Debug.todo "Implement System API"
 
 
-
--- DIRECTORIES
-
-
-{-| List the contents of a directory. The returned [Paths](System-File-Path#Path) are relative to
+{-| List the contents of a directory. The returned [Paths](Path#Path) are relative to
 the directory being listed. Entries are sorted by name, byte by byte.
 -}
 listDirectory : Path -> Task Error (List { path : Path, entityType : EntityType })
-listDirectory path =
+listDirectory =
     Debug.todo "Implement System API"
 
 
-{-| Create a new directory at the given [Path](System-File-Path#Path).
+{-| Create a new directory at the given [Path](Path#Path).
 
 If `recursive` is `True`, then a directory will be created for every section of the
-given [Path](System-File-Path#Path).
+given [Path](Path#Path).
 
 -}
 makeDirectory : { recursive : Bool } -> Path -> Task Error Path
-makeDirectory options path =
+makeDirectory =
     Debug.todo "Implement System API"
 
 
 {-| Create a directory, prefixed by a given name, that ends up in a section of the
-file system reserved for temporary files (see [tmpDirectory](#tmpDirectory)). You're given the
-[Path](System-File-Path#Path) to this new directory.
+file system reserved for temporary files (see [tempDirectory](#tempDirectory)). You're given the
+[Path](Path#Path) to this new directory.
 
 A few random characters are added after the prefix, so every call creates a new directory.
 
 -}
 makeTempDirectory : String -> Task Error Path
-makeTempDirectory prefix =
+makeTempDirectory =
     Debug.todo "Implement System API"
 
 
-
--- LINKS
-
-
-{-| Creates a hard link from the second [Path](System-File-Path#Path) to the first.
+{-| Creates a hard link from the second [Path](Path#Path) to the first.
 
     hardLink linkPath targetPath
 
@@ -502,11 +540,11 @@ the "real" entity and which is the link.
 
 -}
 hardLink : Path -> Path -> Task Error Path
-hardLink linkPath targetPath =
+hardLink =
     Debug.todo "Implement System API"
 
 
-{-| Creates a soft link from the second [Path](System-File-Path#Path) to the first.
+{-| Creates a soft link from the second [Path](Path#Path) to the first.
 
     softLink linkPath targetPath
 
@@ -516,27 +554,23 @@ redirect to this other location.
 
 -}
 softLink : Path -> Path -> Task Error Path
-softLink linkPath targetPath =
+softLink =
     Debug.todo "Implement System API"
 
 
-{-| Returns the [Path](System-File-Path#Path) pointed to by a soft link.
+{-| Returns the [Path](Path#Path) pointed to by a soft link.
 -}
 readLink : Path -> Task Error Path
-readLink path =
+readLink =
     Debug.todo "Implement System API"
 
 
 {-| Removes a link, hard or soft, from the file system. If the
-[Path](System-File-Path#Path) refers to a file, the file is removed.
+[Path](Path#Path) refers to a file, the file is removed.
 -}
 unlink : Path -> Task Error Path
-unlink path =
+unlink =
     Debug.todo "Implement System API"
-
-
-
--- WATCH
 
 
 {-| Represents a change within a watched directory.
@@ -544,7 +578,7 @@ unlink path =
   - `Changed` means that the contents of a file has changed in some way.
   - `Moved` means that an entity has been added or removed. A rename is usually two `Moved` events.
 
-On most operating systems, each event will be associated with a [Path](System-File-Path#Path)
+On most operating systems, each event will be associated with a [Path](Path#Path)
 relative to the watched directory, but some operating systems will not provide that information.
 
 -}
@@ -554,25 +588,21 @@ type WatchEvent
 
 
 {-| This notifies your application every time there is a change within the directory
-represented by the given [Path](System-File-Path#Path).
+represented by the given [Path](Path#Path).
 -}
 watch : (WatchEvent -> msg) -> Path -> Sub msg
-watch toMsg path =
+watch =
     Debug.todo "Implement System API"
 
 
 {-| Same as [watch](#watch), but this will also watch for changes in sub-directories.
 -}
 watchRecursive : (WatchEvent -> msg) -> Path -> Sub msg
-watchRecursive toMsg path =
+watchRecursive =
     Debug.todo "Implement System API"
 
 
-
--- SPECIAL PATHS
-
-
-{-| Find the [Path](System-File-Path#Path) that represents the home directory of the current user.
+{-| Find the [Path](Path#Path) that represents the home directory of the current user.
 
 This is `$HOME` when it is set, and otherwise the home directory recorded for the user in the
 system's user database.
@@ -594,18 +624,18 @@ currentWorkingDirectory =
     Debug.todo "Implement System API"
 
 
-{-| Find a [Path](System-File-Path#Path) that represents a directory meant to hold temporary files.
+{-| Find a [Path](Path#Path) that represents a directory meant to hold temporary files.
 
 This is the first of the `TMPDIR`, `TMP` and `TEMP` environment variables that is set, and
 `/tmp` otherwise.
 
 -}
-tmpDirectory : Task x Path
-tmpDirectory =
+tempDirectory : Task x Path
+tempDirectory =
     Debug.todo "Implement System API"
 
 
-{-| [Path](System-File-Path#Path) to a file which is always empty. Anything written to this file
+{-| [Path](Path#Path) to a file which is always empty. Anything written to this file
 will be discarded.
 -}
 devNull : Task x Path

@@ -5,13 +5,19 @@ module System exposing
     , onEmptyEventLoop, onSignalInterrupt, onSignalTerminate
     )
 
-{-| An Eco system program is an ordinary Elm `Platform.Program` whose flags are the
-[`Environment`](#Environment). Eco builds the environment when the program starts and hands it
-to `init`: it tells you which platform you are running on, which arguments the program was
-invoked with and when it started, and gives you the standard input, output and error streams.
+{-| An Eco system program is an ordinary Elm `Platform.Program` that runs as a command-line tool
+or a server, and this module is what makes it one: the [`Environment`](#Environment) it starts
+with, and the controls that act on the whole running program, such as its exit code and the
+signals sent to it.
 
-Long-lived programs that keep state, react to messages and listen to subscriptions are made
-with `Platform.worker`:
+The flags of such a program are an `Environment`. Eco recognises a `main` whose flags type is
+`System.Environment` and builds the environment itself when the program starts, so any flags
+JSON a host supplies is ignored. The environment tells you which platform the program is
+running on, which arguments it was started with and when it started, and gives you its standard
+input, output and error streams.
+
+Programs that keep state, react to messages and listen to subscriptions are made with
+`Platform.worker`:
 
     main : Platform.Program System.Environment Model Msg
     main =
@@ -21,7 +27,7 @@ with `Platform.worker`:
             , subscriptions = subscriptions
             }
 
-Short-lived programs that run a single task and then finish are made with
+A _simple program_ runs a single task and then ends. It is made with
 [`simpleProgram`](#simpleProgram):
 
     main : Platform.Program System.Environment () ()
@@ -29,12 +35,19 @@ Short-lived programs that run a single task and then finish are made with
         System.simpleProgram
             (\env -> Stream.logLine "Hello, world!" env.stdout)
 
-The flags type `System.Environment` is supplied by the Eco compiler and runtime; it cannot be
-passed in from JavaScript like ordinary JSON flags.
+A program runs while it has work, and ends when it has none: no messages are waiting to be
+handled and no IO or timer it started is still pending. That moment is called an _empty event loop_, and
+[`onEmptyEventLoop`](#onEmptyEventLoop) reports it. Some resources count as pending IO: for
+example, an open `Socket.Listener` keeps the program running until it is closed, while an idle
+`Socket.Connection`, with no read or write in progress, does not. None of this module's
+subscriptions keeps a program running. [`exit`](#exit) and
+[`exitWithCode`](#exitWithCode) end the program at once, without waiting for pending IO.
 
-This module is a port of the `Node` module of gren-node. Every subsystem (files, processes, the
-terminal, the HTTP server) can be used directly once the program has started; there is nothing
-to set up first.
+Eco compiles a program either to native code or to JavaScript run by Node. Where the two
+behave differently, the docstrings say so. A native program can also be embedded in a host
+application, which then owns the process. An embedded program does not end when it runs out of
+work: it runs until the host stops it or it calls [`exitWithCode`](#exitWithCode). Embedding
+also changes what exiting and signals do, as the functions below describe.
 
 
 # Simple Program
@@ -68,20 +81,27 @@ import Task exposing (Task)
 import Time
 
 
-{-| Contains information about the environment your application was started in.
+{-| What a program is told about itself when it starts: the platform it runs on, how it was
+started, and its standard streams.
 
-  - `platform` and `cpuArchitecture` tell you about the operating system and machine your
-    application is running on.
-  - `applicationPath` is the real path of the currently executing program.
-  - `args` is the full list of command line arguments, exactly as the C `argv` array. The
-    first element, `args[0]`, is the program as it was invoked. This differs from gren-node,
-    where the list starts with the path to the `node` binary followed by the script path, so a
-    gren program that drops two leading arguments must drop only one here.
-  - `startTime` is the time the program started, read once at startup, so `init` doesn't need
-    to ask for the time first.
-  - `stdout`, `stderr` and `stdin` are streams you can use to communicate with the outside
-    world. Take a closer look at the `Stream` module for more information; `Stream.readLine`
-    reads standard input line by line.
+  - `applicationPath` is the path of the running program. On the native backend it is the
+    executable, with symbolic links resolved where the system allows it, or `Path.empty` where
+    it cannot be read, which includes every system other than Linux and macOS. On the
+    JavaScript backend it is the path of the compiled JavaScript file, with symbolic links
+    resolved where possible, or of the `node` executable when the program is not loaded as a
+    CommonJS module. The text is read with [`Path.fromPosixString`](Path#fromPosixString) on every
+    system.
+  - `args` holds the command line arguments. On the native backend, on Linux, macOS and
+    Windows, it is the process's C `argv`, so it starts with the program as it was invoked;
+    elsewhere the list is empty. Embedded
+    in a host application, it is the host's `argv`. On the JavaScript backend it is Node's
+    `process.argv` without the `node` executable, so it starts with the script.
+  - `startTime` is read once, when the environment is built just before `init`, so `init` does
+    not need to ask for the time.
+  - `stdout`, `stderr` and `stdin` are three separate streams over the process's standard
+    output, error and input; the `Stream` module says what can be done with them, and
+    `Stream.readLine` reads standard input a line at a time. Closing or cancelling one of them
+    ends that stream but leaves the process's standard file descriptor open.
 
 -}
 type alias Environment =
@@ -96,8 +116,14 @@ type alias Environment =
     }
 
 
-{-| The platform, or operating system, that your application is running on. Platforms that
-are not recognised are reported as `UnknownPlatform`, carrying the platform's own name.
+{-| The operating system a program is running on, spelled as Node's `process.platform` spells
+it. `Win32` is Windows and `Darwin` is macOS; `Linux`, `FreeBSD`, `OpenBSD`, `SunOS` and
+`Aix` are the systems they name.
+
+`UnknownPlatform` carries the name of any other platform, as the backend reported it. On the
+native backend the platform is fixed when the program is compiled, and one this type does not
+name is reported as `UnknownPlatform "unknown"`.
+
 -}
 type Platform
     = Win32
@@ -110,8 +136,16 @@ type Platform
     | UnknownPlatform String
 
 
-{-| The CPU architecture your application is running on. Architectures that are not
-recognised are reported as `UnknownArchitecture`, carrying the architecture's own name.
+{-| The processor architecture a program is running on, spelled as Node's `process.arch` spells
+it. `X64` is 64-bit x86 and `IA32` 32-bit x86; `Arm` and `Arm64` are 32-bit and 64-bit Arm;
+`Mips` and `Mipsel` are big-endian and little-endian MIPS; `PPC` and `PPC64` are 32-bit and
+64-bit PowerPC; `S390` and `S390x` are 31-bit and 64-bit IBM mainframe (s390) processors.
+
+`UnknownArchitecture` carries the name of any other architecture, as the backend reported it.
+On the native backend the architecture is fixed when the program is compiled; 64-bit RISC-V is
+reported as `UnknownArchitecture "riscv64"`, and any other architecture this type does not
+name as `UnknownArchitecture "unknown"`.
+
 -}
 type CpuArchitecture
     = Arm
@@ -127,21 +161,24 @@ type CpuArchitecture
     | UnknownArchitecture String
 
 
-{-| Get a `Dict` of the environment variables of the running process, mapping each variable
-name to its value.
+{-| Reads the environment variables of the running process, mapping each variable's name to
+its value.
+
+The variables are read when the task runs, not when the program starts. On the native backend
+an entry with no `=` is read as a name with the empty value.
+
 -}
 environmentVariables : Task x (Dict String String)
 environmentVariables =
     Debug.todo "Implement System API"
 
 
-{-| Define a simple program that doesn't require long-lived state or the ability to respond to
-messages or subscriptions. Ideal for simple and short-lived programs.
+{-| Creates a simple program: one that runs the task `run` makes from the
+[`Environment`](#Environment), and has no state, messages or subscriptions.
 
-The function receives the [`Environment`](#Environment) and returns the task to run. The
-result of the task is ignored: the program ends once the task, and any IO it started, has
-completed. To end with a non-zero exit code, finish the task with
-[`setExitCode`](#setExitCode).
+The task's result is ignored. The program ends as any program does, so it waits for IO the
+task started even after the task has finished. To end with a non-zero
+exit code, finish the task with [`setExitCode`](#setExitCode):
 
     main : Platform.Program System.Environment () ()
     main =
@@ -162,26 +199,23 @@ simpleProgram =
     Debug.todo "Implement System API"
 
 
-{-| Terminate the program immediately. Buffered standard output is flushed, but the program
-will not wait for tasks like HTTP requests or file system writes to complete.
-
-This function is equivalent to:
-
-    exitWithCode 0
-
+{-| Ends the program at once with exit code 0, as `exitWithCode 0` does.
 -}
 exit : Cmd msg
 exit =
     Debug.todo "Implement System API"
 
 
-{-| Terminate the program immediately with the given exit code. Buffered standard output is
-flushed, but the program will not wait for tasks like HTTP requests or file system writes, so
-only use this if you've reached a state where it makes no sense to continue.
+{-| Ends the program at once with exit `code`.
 
-The exit code can be read by other processes on your system. Any value other than 0 is
-considered an error, but there are no other formal requirements for what makes an exit code.
-If all you want is to signal that your application exited due to an error, 1 is a good option.
+It does not wait for work still in progress, such as an HTTP request, a file write, a stream
+write that has not yet succeeded, or a value `Stream.enqueue` has queued but not yet written,
+so it is for a state where continuing makes no sense; to end once that work is done, use
+[`setExitCode`](#setExitCode) instead. The exit code can be read by the process that started
+the program.
+
+On the native backend, when the program is embedded in a host application, the process is not
+ended: the program stops and the host receives `code`.
 
 -}
 exitWithCode : Int -> Cmd msg
@@ -189,10 +223,10 @@ exitWithCode =
     Debug.todo "Implement System API"
 
 
-{-| Set the exit code that the program will return once it finishes.
+{-| Sets the exit code the program ends with, without ending it.
 
-This will not terminate your program, so things like HTTP requests or writes to the file
-system are allowed to complete. The program only exits once there is no ongoing work left.
+A later `setExitCode` replaces the code, and [`exitWithCode`](#exitWithCode) ends the program
+with its own.
 
 -}
 setExitCode : Int -> Task x ()
@@ -200,12 +234,17 @@ setExitCode =
     Debug.todo "Implement System API"
 
 
-{-| Receive the given message when the program has run out of work: there are no queued
-messages and no pending IO. This is the equivalent of Node's `beforeExit` event.
+{-| Creates a subscription that receives `msg` when the program has an empty event loop:
+no messages are waiting to be handled and no IO is pending, so the program would otherwise end.
 
-If handling the message starts new IO, the program keeps running and the message will be
-delivered again the next time the program runs out of work. If it does not, the program exits.
-This subscription never fires when the program is embedded in a host application.
+If handling the message starts new IO, the program keeps running, and `msg` arrives again the
+next time it runs out of work. If it starts none, the program ends once any other work it
+started has finished. The two backends count different work as new: on the native backend any
+asynchronous work does, a `Process.sleep` included, while on the JavaScript backend only IO
+started through this package's streams and kernels does.
+
+On the native backend the subscription never fires when the program is embedded in a host
+application.
 
 -}
 onEmptyEventLoop : msg -> Sub msg
@@ -213,18 +252,28 @@ onEmptyEventLoop =
     Debug.todo "Implement System API"
 
 
-{-| Receive the given message when the process receives an interrupt signal (`SIGINT`), which
-usually happens when the user presses Ctrl+C in the terminal. While subscribed, the signal no
-longer terminates the program, so you are expected to exit yourself.
+{-| Creates a subscription that receives `msg` when the process is sent an interrupt
+signal (`SIGINT`, the signal a terminal sends on Ctrl+C).
+
+While the subscription exists, the signal no longer ends the program, so ending it is up to the
+program. The subscription does not keep the program running. On the native backend it has no
+effect on Windows or when the program is embedded in a host application: it never fires, and
+the signal is handled as it would be without it.
+
 -}
 onSignalInterrupt : msg -> Sub msg
 onSignalInterrupt =
     Debug.todo "Implement System API"
 
 
-{-| Receive the given message when the process receives a terminate signal (`SIGTERM`), the
-polite request to shut down sent by service managers and the `kill` command. While subscribed,
-the signal no longer terminates the program, so you are expected to exit yourself.
+{-| Creates a subscription that receives `msg` when the process is sent a terminate
+signal (`SIGTERM`, the request to shut down that service managers and the `kill` command send).
+
+While the subscription exists, the signal no longer ends the program, so ending it is up to the
+program. The subscription does not keep the program running. On the native backend it has no
+effect on Windows or when the program is embedded in a host application: it never fires, and
+the signal is handled as it would be without it.
+
 -}
 onSignalTerminate : msg -> Sub msg
 onSignalTerminate =

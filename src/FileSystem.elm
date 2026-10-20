@@ -10,17 +10,49 @@ module FileSystem exposing
     , errorIsPermissionDenied, errorIsFileExists, errorIsDirectoryFound, errorIsTooManyOpenFiles, errorIsNoSuchFileOrDirectory, errorIsNotADirectory, errorIsDirectoryNotEmpty, errorIsNotPermitted, errorIsLinkLoop, errorIsPathTooLong, errorIsInvalidInput, errorIsIO
     )
 
-{-| This module provides access to the file system. It allows you to read and write files, create
-directories and links, and so on. Locations are given as a [Path](Path#Path).
+{-| A program needs to read, write and manage the files, directories and links it names, and this
+module does that by [Path](Path#Path). Apart from the file streams, each task here opens and
+closes whatever it needs. To keep a file open, read and write it at offsets, or act on the file
+that was opened even after its path has been renamed or replaced, use
+[FileSystem.Handle](FileSystem-Handle).
 
-Every function that changes the file system succeeds with the [Path](Path#Path) it was
-given, which makes it easy to chain operations on the same entity. If you know you are going to
-perform many operations on the same file, or need to read and write at arbitrary offsets,
-[FileSystem.Handle](FileSystem-Handle) can be more efficient. Writes that must reach the disk
-before you continue, and writes that must not replace an existing file, don't need handles: see
-[writeFileWith](#writeFileWith) and [writeFileStreamWith](#writeFileStreamWith).
+An _entity_ is anything a path can name: a file, a directory, a symbolic link, a socket, a device
+or a pipe (see [EntityType](#EntityType)).
 
-Unlike gren-node's `FileSystem` module, no permission value is needed to use these functions.
+A path reaches the operating system as the text [Path.toPosixString](Path#toPosixString) prints,
+and every path that comes back, from [realPath](#realPath), [readLink](#readLink),
+[listDirectory](#listDirectory), [makeTempDirectory](#makeTempDirectory), the special paths and
+watch events, is parsed with [Path.fromPosixString](Path#fromPosixString). Both are lexical and
+lossy, as the [Path](Path) module describes.
+
+Most functions that change the file system succeed with a `Path`, so that calls on one entity can
+be chained. It is the path the function was given, with two exceptions. The two-path functions
+[move](#move), [copyFile](#copyFile), [hardLink](#hardLink) and [softLink](#softLink) take the
+destination, or the new link, first and the source, or the target, second, and succeed with the
+first. [makeTempDirectory](#makeTempDirectory) succeeds with the directory it created.
+[writeFileStream](#writeFileStream) and [writeFileStreamWith](#writeFileStreamWith) succeed with
+a stream instead.
+
+A task here that fails, fails with an [Error](#Error), which carries the path it concerns, a
+code and a message. For the two-path functions that path is the first one as well;
+[errorPath](#errorPath) gives the full rule.
+
+[readFileStream](#readFileStream) and [writeFileStream](#writeFileStream) hand the file over as
+a stream. They open the file before the task succeeds, so a file that cannot be opened fails the
+task with an `Error`. After that, failures arrive on the stream as a `Stream.Error`, as the
+[Stream](Stream) module describes.
+
+Two kinds of write ask more than [writeFile](#writeFile) gives, and [WriteOptions](#WriteOptions)
+selects them. A _durable_ write flushes the file's data to the storage device before it
+succeeds. An _exclusive_ write creates the file, and fails if anything already exists at the
+path.
+
+[watch](#watch) and [watchRecursive](#watchRecursive) are subscriptions to changes at a path.
+While a subscription to a path that could be watched exists, it keeps the program running.
+
+On the native backend under Windows the file system is not supported: every task here that can
+fail fails with the code `"ENOTSUP"`, and a watch subscription stops the program with a fatal
+error.
 
 
 ## Metadata
@@ -65,6 +97,7 @@ Unlike gren-node's `FileSystem` module, no permission value is needed to use the
 
 -}
 
+import FileSystem.Internal
 import Bytes exposing (Bytes)
 import Dict exposing (Dict)
 import Path exposing (Path)
@@ -73,21 +106,30 @@ import Task exposing (Task)
 import Time
 
 
-{-| Represents an error that occurred when working with the file system.
+{-| A failed file system operation: the path it concerned, a code naming the kind of failure,
+and a message describing it.
 
-There are many different kinds of error depending on which operation you're performing and which
-operating system you're performing it on. To figure out which error it is, you'll need
-to use one of the helper functions below, or check the specific error code.
+The three parts are read with [errorPath](#errorPath), [errorCode](#errorCode) and
+[errorToString](#errorToString), and the `errorIs*` functions test the code. Which code a
+failure gets can depend on the operating system. An `Error` is not interchangeable with
+`Socket.Error` or `Stream.Error`. Only the tasks of this module and of
+[FileSystem.Handle](FileSystem-Handle) make one.
 
 -}
-type Error
-    = Error
+type alias Error =
+    FileSystem.Internal.Error
 
 
-{-| The path where the error occurred.
+{-| Returns the path an error concerns.
 
-For [copyFile](#copyFile), [move](#move), [hardLink](#hardLink) and [softLink](#softLink) this
-is the **destination** path.
+For a function of this module it is the path the function was given, with two exceptions. For
+[move](#move), [copyFile](#copyFile), [hardLink](#hardLink) and [softLink](#softLink) it is the
+first path, the destination or new link, even when the failure was about the source. For
+[makeTempDirectory](#makeTempDirectory) it is [tempDirectory](#tempDirectory) with the prefix
+appended, without the random characters, which is not the path of any directory it created.
+
+For an operation on an open [FileSystem.Handle](FileSystem-Handle) it is
+[Path.empty](Path#empty).
 
 -}
 errorPath : Error -> Path
@@ -95,11 +137,11 @@ errorPath =
     Debug.todo "Implement System API"
 
 
-{-| A string that identifies a specific kind of error. There can be several error codes for the
-same kind of error, depending on the operating system that is in use.
+{-| Returns the code naming the kind of failure.
 
-This is usually an errno name such as `"ENOENT"`. A non-recursive [remove](#remove) of a directory
-reports `"ERR_FS_EISDIR"`, so [errorIsDirectoryFound](#errorIsDirectoryFound) is `False` in that case.
+It is usually the operating system's errno name, such as `"ENOENT"`. A non-recursive
+[remove](#remove) of a directory reports `"ERR_FS_EISDIR"`, so
+[errorIsDirectoryFound](#errorIsDirectoryFound) is `False` in that case.
 
 -}
 errorCode : Error -> String
@@ -107,104 +149,125 @@ errorCode =
     Debug.todo "Implement System API"
 
 
-{-| Returns a human readable description of the error.
+{-| Returns the error's message as the kernel gave it, with no code or path added.
+
+The message usually begins with the code, as in `"ENOENT: no such file or directory, open '/x'"`.
+The message for `"ERR_FS_EISDIR"` does not: it is
+`"Path is a directory: rm returned EISDIR (is a directory) /x"`.
+
 -}
 errorToString : Error -> String
 errorToString =
     Debug.todo "Implement System API"
 
 
-{-| If `True`, the error occurred because you don't have the correct access permission to perform
-the operation.
+{-| Checks whether the code is `"EACCES"`: access permissions, of the entity or of a directory on
+its path, refused the operation.
 -}
 errorIsPermissionDenied : Error -> Bool
 errorIsPermissionDenied =
     Debug.todo "Implement System API"
 
 
-{-| If `True`, a file exists when it was expected not to.
+{-| Checks whether the code is `"EEXIST"`: something already exists at a path that had to be new,
+as for an exclusive write (see [WriteOptions](#WriteOptions)) or a link path that is taken.
 -}
 errorIsFileExists : Error -> Bool
 errorIsFileExists =
     Debug.todo "Implement System API"
 
 
-{-| If `True`, a file operation was attempted on a directory.
+{-| Checks whether the code is `"EISDIR"`: a directory was found where a file was needed, as when
+[readFile](#readFile), [readFileStream](#readFileStream) or [copyFile](#copyFile) is given a
+directory. A non-recursive [remove](#remove) of a directory reports `"ERR_FS_EISDIR"` instead, for
+which this is `False`.
 -}
 errorIsDirectoryFound : Error -> Bool
 errorIsDirectoryFound =
     Debug.todo "Implement System API"
 
 
-{-| If `True`, the application has too many open files.
+{-| Checks whether the code is `"EMFILE"`: the program has as many files open as it is allowed.
 -}
 errorIsTooManyOpenFiles : Error -> Bool
 errorIsTooManyOpenFiles =
     Debug.todo "Implement System API"
 
 
-{-| If `True`, the code was passed a [Path](Path#Path) which points to a file or
-directory that doesn't exist.
+{-| Checks whether the code is `"ENOENT"`: the entity, or a directory on its path, does not exist.
 -}
 errorIsNoSuchFileOrDirectory : Error -> Bool
 errorIsNoSuchFileOrDirectory =
     Debug.todo "Implement System API"
 
 
-{-| If `True`, a directory was expected but it found a file or some other entity.
+{-| Checks whether the code is `"ENOTDIR"`: an entry that had to be a directory, either the path
+itself or an entry on it, is something else.
 -}
 errorIsNotADirectory : Error -> Bool
 errorIsNotADirectory =
     Debug.todo "Implement System API"
 
 
-{-| If `True`, the operation expected an empty directory, but the directory is not empty.
+{-| Checks whether the code is `"ENOTEMPTY"`: a directory that had to be empty is not.
 -}
 errorIsDirectoryNotEmpty : Error -> Bool
 errorIsDirectoryNotEmpty =
     Debug.todo "Implement System API"
 
 
-{-| If `True`, the operation was rejected because of missing privileges.
+{-| Checks whether the code is `"EPERM"`: the operation needs a privilege the program does not have,
+such as changing the owner of a file it does not own.
 -}
 errorIsNotPermitted : Error -> Bool
 errorIsNotPermitted =
     Debug.todo "Implement System API"
 
 
-{-| If `True`, we seem to be stuck in a loop following link after link after...
+{-| Checks whether the code is `"ELOOP"`: resolving the path followed too many symbolic links, as
+happens when links form a loop.
 -}
 errorIsLinkLoop : Error -> Bool
 errorIsLinkLoop =
     Debug.todo "Implement System API"
 
 
-{-| If `True`, the [Path](Path#Path) is too long.
+{-| Checks whether the code is `"ENAMETOOLONG"`: the path, or an entry on it, is too long.
 -}
 errorIsPathTooLong : Error -> Bool
 errorIsPathTooLong =
     Debug.todo "Implement System API"
 
 
-{-| If `True`, the arguments passed to the function are invalid somehow.
+{-| Checks whether the code is `"EINVAL"`: an argument was not valid for the operation, as when
+[readLink](#readLink) is given a path that is not a symbolic link.
 -}
 errorIsInvalidInput : Error -> Bool
 errorIsInvalidInput =
     Debug.todo "Implement System API"
 
 
-{-| If `True`, the operation failed due to an IO error. This could be that the disk is
-busy, or even corrupt.
+{-| Checks whether the code is `"EIO"`: a low-level input or output error, such as a failing
+storage device.
 -}
 errorIsIO : Error -> Bool
 errorIsIO =
     Debug.todo "Implement System API"
 
 
-{-| Represents extra information about an entity in the file system.
+{-| What the operating system reports about one entity, as [metadata](#metadata) returns it.
 
-Sizes are in bytes, and the four times have millisecond resolution where the operating system
-provides it.
+`deviceID` identifies the device that holds the entity; for a `Device` entity it is not the
+number of the device the entity stands for. `userID` and `groupID` are the owner's numeric ids.
+`blockSize` is the size in bytes the operating system prefers for IO, and `blocks` is the number
+of blocks allocated to the entity, which Linux and macOS count in 512-byte units, not in units of
+`blockSize`.
+
+The four times are whole milliseconds. `lastChanged` is the status change time, when the entity's
+metadata or contents last changed, not a creation time. `created` is the time the entity was
+created when that can be read (natively, on macOS, and on Linux when `statx` reports one; on the
+JS backend, when Node.js reports one); otherwise it is the status change time, equal to
+`lastChanged`.
 
 -}
 type alias Metadata =
@@ -222,7 +285,13 @@ type alias Metadata =
     }
 
 
-{-| The type of an entity in the file system.
+{-| The kind of an entity in the file system.
+
+`File` is a regular file. `Socket` is a Unix domain socket. `Symlink` is a symbolic link, which is
+reported only where a link is not followed: by [metadata](#metadata) with `resolveLink = False`,
+and by [listDirectory](#listDirectory). `Device` is a character or block device, or any other
+kind of entity not named here. `Pipe` is a named pipe (FIFO).
+
 -}
 type EntityType
     = File
@@ -233,10 +302,10 @@ type EntityType
     | Pipe
 
 
-{-| Return metadata for the entity represented by [Path](Path#Path).
+{-| Returns the metadata of the entity at the path.
 
-If `resolveLink` is `False`, you will receive metadata for the link itself, not the entity
-pointed at by the link.
+With `resolveLink = True` a symbolic link is followed and the entity it points to is described.
+With `resolveLink = False` a link is described itself, with the `entityType` `Symlink`.
 
 -}
 metadata : { resolveLink : Bool } -> Path -> Task Error Metadata
@@ -244,10 +313,10 @@ metadata =
     Debug.todo "Implement System API"
 
 
-{-| Represents the permission to access an entity for a specific operation.
+{-| One way of accessing an entity: reading it, writing it, or executing it.
 
-For example: if you, or your group, doesn't have the `Read` permission for a file,
-you're not allowed to read from it.
+[checkAccess](#checkAccess) tests a list of them, and [changeAccess](#changeAccess) grants a
+list of them to each of an entity's owner, group and everyone else.
 
 -}
 type AccessPermission
@@ -256,10 +325,10 @@ type AccessPermission
     | Execute
 
 
-{-| Check if the user running this application has the given access permissions for the
-entity represented by [Path](Path#Path).
+{-| Checks that the program may access the entity at the path in each of the given ways, and
+succeeds with the path if it may.
 
-Passing an empty `List` will check that the entity exists.
+An empty list checks only that the entity exists.
 
 -}
 checkAccess : List AccessPermission -> Path -> Task Error Path
@@ -267,11 +336,13 @@ checkAccess =
     Debug.todo "Implement System API"
 
 
-{-| Change the access permissions for the entity's owner, group and everyone else.
+{-| Sets the access permissions of the entity at the path, for its owner, its group and everyone
+else.
 
-Each list is turned into one octal digit of the file mode with
-[accessPermissionsToInt](#accessPermissionsToInt), so
-`{ owner = [ Read, Write ], group = [ Read ], others = [ Read ] }` sets mode `644`.
+Each list becomes one octal digit of the file mode, as
+[accessPermissionsToInt](#accessPermissionsToInt) computes it, so
+`{ owner = [ Read, Write ], group = [ Read ], others = [ Read ] }` sets the mode `644`. The mode
+has no other bits, so the set-user-ID, set-group-ID and sticky bits are cleared.
 
 -}
 changeAccess : { owner : List AccessPermission, group : List AccessPermission, others : List AccessPermission } -> Path -> Task Error Path
@@ -279,7 +350,8 @@ changeAccess =
     Debug.todo "Implement System API"
 
 
-{-| The integer representation of a set of access permissions in a posix system.
+{-| Returns the POSIX permission digit for a list of permissions: 4 for `Read`, plus 2 for
+`Write`, plus 1 for `Execute`. A permission listed twice counts once.
 
     accessPermissionsToInt [ Read, Write ] == 6
 
@@ -289,12 +361,10 @@ accessPermissionsToInt =
     Debug.todo "Implement System API"
 
 
-{-| Change the user and group that owns a file.
+{-| Sets the user and group that own the entity at the path, given as numeric ids.
 
-You'll need the ID of the owner and group to perform this operation.
-
-If `resolveLink` is `False`, you're changing the owner of the link itself,
-not the entity it points to.
+With `resolveLink = False` the owner of a symbolic link itself is changed, not that of the
+entity it points to.
 
 -}
 changeOwner : { userID : Int, groupID : Int, resolveLink : Bool } -> Path -> Task Error Path
@@ -302,11 +372,15 @@ changeOwner =
     Debug.todo "Implement System API"
 
 
-{-| Change the registered time (down to the second) an entity was accessed and modified.
-Times are rounded down to the whole second.
+{-| Sets the last access and last modification times of the entity at the path.
 
-If `resolveLink` is `False`, you're changing the last access and modification time of the link
-itself, not the entity it points to.
+The times are set in whole seconds: each is sent as its milliseconds divided by 1000 with `//`,
+which rounds down for times after 1970 and toward zero for times before. On the JS backend `//`
+gives a 32-bit result, so a time from 2038-01-19T03:14:08Z on, or at or before
+1901-12-13T20:45:51Z, is not set as given.
+
+With `resolveLink = False` the times of a symbolic link itself are changed, not those of the
+entity it points to.
 
 -}
 changeTimes : { lastAccessed : Time.Posix, lastModified : Time.Posix, resolveLink : Bool } -> Path -> Task Error Path
@@ -314,13 +388,13 @@ changeTimes =
     Debug.todo "Implement System API"
 
 
-{-| Move the entity represented by the second [Path](Path#Path), to the location
-represented by the first [Path](Path#Path). This can also be used to rename an
-entity.
+{-| Moves, or renames, the entity at the second path to the first.
 
     move newPath oldPath
 
-The task succeeds with the new path. If it fails, [errorPath](#errorPath) is the new path.
+The task succeeds with the new path. If it fails, [errorPath](#errorPath) is the new path. This
+is the operating system's rename and nothing more, so a move to another file system fails
+(`"EXDEV"`) rather than copying.
 
 -}
 move : Path -> Path -> Task Error Path
@@ -328,22 +402,22 @@ move =
     Debug.todo "Implement System API"
 
 
-{-| If you have a [Path](Path#Path) that is relative to the current directory,
-or points at a link, you can use this to find the true [Path](Path#Path) of the
-entity.
+{-| Returns the path the operating system gives for the entity at the path, with every symbolic
+link resolved. The entity must exist.
 -}
 realPath : Path -> Task Error Path
 realPath =
     Debug.todo "Implement System API"
 
 
-{-| Copy the file represented by the second [Path](Path#Path), to the location
-represented by the first [Path](Path#Path).
+{-| Copies the file at the second path to the first.
 
     copyFile destinationPath sourcePath
 
-An existing file at the destination is overwritten. The task succeeds with the destination path,
-and if it fails, [errorPath](#errorPath) is the destination path.
+An existing file at the destination is overwritten, and the copy gets the source's mode. A
+directory as the source fails with `"EISDIR"` before the destination is touched. The task
+succeeds with the destination path, and if it fails, [errorPath](#errorPath) is the destination
+path.
 
 -}
 copyFile : Path -> Path -> Task Error Path
@@ -351,18 +425,17 @@ copyFile =
     Debug.todo "Implement System API"
 
 
-{-| Add `Bytes` to the end of a file. The file is created if it doesn't exist.
+{-| Adds the bytes to the end of the file at the path, creating the file if it does not exist.
 -}
 appendToFile : Bytes -> Path -> Task Error Path
 appendToFile =
     Debug.todo "Implement System API"
 
 
-{-| Read the entire contents of a file.
+{-| Reads the whole of the file at the path.
 
-Note: This will return the entire contents of a file at once. For very large
-files this might cause you to run out of memory. In those cases you might want
-to use [readFileStream](#readFileStream) instead.
+The contents are read into memory at once. For a very large file,
+[readFileStream](#readFileStream) reads it in pieces instead.
 
 -}
 readFile : Path -> Task Error Bytes
@@ -370,13 +443,18 @@ readFile =
     Debug.todo "Implement System API"
 
 
-{-| Specify where in a file you'll start streaming data from.
+{-| Which bytes of a file [readFileStream](#readFileStream) delivers. Offsets count bytes from the
+beginning of the file.
 
-  - `Beginning` reads the entire file.
-  - `From` skips the associated number of bytes, then streams the rest of the file.
-  - `Between` reads just the bytes between `start` and `end`, both of which are offsets from the
-    beginning of the file. The `end` offset is **inclusive**: `Between { start = 0, end = 9 }`
-    reads ten bytes.
+`Beginning` delivers the whole file.
+
+`From n` skips the first `n` bytes and delivers the rest. A negative `n` is 0, and an `n` past the
+end gives a stream with nothing in it.
+
+`Between` delivers the bytes from `start` to `end`, and `end` is **inclusive**:
+`Between { start = 0, end = 9 }` delivers ten bytes, or fewer if the file is shorter. A negative
+`start` is 0. A negative `end` delivers everything from `start` to the end of the file; otherwise
+an `end` before `start` delivers nothing.
 
 -}
 type ReadFileStreamMode
@@ -385,10 +463,11 @@ type ReadFileStreamMode
     | Between { start : Int, end : Int }
 
 
-{-| Read the contents of a file as a stream.
+{-| Opens the file at the path and returns a stream of its bytes, the ones `mode` selects.
 
-**Deviation from gren-node:** errors opening the file (for example a missing file) fail this task
-itself, rather than being reported by the first read from the stream.
+The file is opened before the task succeeds, so a file that cannot be opened, such as a missing
+file or a directory (`"EISDIR"`), fails this task with an [Error](#Error). Failures while reading
+arrive on the stream as a `Stream.Error`.
 
 -}
 readFileStream : ReadFileStreamMode -> Path -> Task Error (Stream.Readable Bytes)
@@ -396,8 +475,8 @@ readFileStream =
     Debug.todo "Implement System API"
 
 
-{-| Write the given `Bytes` into a file. The file will be created if it doesn't exist,
-and overwritten if it does.
+{-| Writes the bytes into the file at the path, creating the file if it does not exist and
+replacing its contents if it does.
 
 This is [writeFileWith](#writeFileWith) with [defaultWriteOptions](#defaultWriteOptions).
 
@@ -407,15 +486,18 @@ writeFile =
     Debug.todo "Implement System API"
 
 
-{-| Specify how the streamed bytes will be entered into the file.
+{-| Where the bytes written to a [writeFileStream](#writeFileStream) go in the file.
 
-  - `Replace` will delete all existing bytes in the file and add new bytes from the beginning.
-    The file is created if it doesn't exist.
-  - `ReplaceFrom` will keep the associated number of bytes already in the file, but replace
-    everything after with the streamed data. The file must already exist. When the stream is
-    closed, the file is cut off at the end of the streamed data.
-  - `Append` will keep the contents of the file untouched, and add new data at the end.
-    The file is created if it doesn't exist.
+`Replace` empties the file, or creates it, and writes from the beginning.
+
+`ReplaceFrom n` keeps the first `n` bytes and writes from there. A file shorter than `n` is
+extended with zero bytes up to `n` once anything is written or the stream is closed. When the stream is closed, the file is cut off
+where the writing ended, so whatever followed is gone; a cancelled stream is not cut off. For
+`n > 0` the file must already exist, unless `createNew` (see [WriteOptions](#WriteOptions)) is set, which
+requires that it does not and creates it.
+`ReplaceFrom n` with `n <= 0` is `Replace`, and creates the file.
+
+`Append` writes at the end of the file, creating it if it does not exist.
 
 -}
 type WriteFileStreamMode
@@ -424,9 +506,14 @@ type WriteFileStreamMode
     | Append
 
 
-{-| Create a writable stream backed by a file. Close the stream when you are done writing to it.
+{-| Opens the file at the path and returns a stream whose bytes are written into it, where `mode`
+says. Close the stream when you are done writing to it.
 
-This is [writeFileStreamWith](#writeFileStreamWith) with [defaultWriteOptions](#defaultWriteOptions).
+The file is opened before the task succeeds, so a file that cannot be opened fails this task with
+an [Error](#Error). Failures while writing arrive on the stream as a `Stream.Error`.
+
+This is [writeFileStreamWith](#writeFileStreamWith) with
+[defaultWriteOptions](#defaultWriteOptions).
 
 -}
 writeFileStream : WriteFileStreamMode -> Path -> Task Error (Stream.Writable Bytes)
@@ -434,16 +521,21 @@ writeFileStream =
     Debug.todo "Implement System API"
 
 
-{-| Options for [writeFileWith](#writeFileWith) and [writeFileStreamWith](#writeFileStreamWith).
+{-| What [writeFileWith](#writeFileWith) and [writeFileStreamWith](#writeFileStreamWith) ask of a
+write beyond what [writeFile](#writeFile) does.
 
-  - `createNew`: create the file, and fail with an error for which
-    [errorIsFileExists](#errorIsFileExists) is `True` if something already exists at the path
-    (`O_EXCL`). The check and the creation are one atomic step, which makes this the right tool
-    for lock files and for output that must never replace an existing file.
-  - `sync`: make sure the data has reached the storage device (`fsync`) before the write
-    succeeds. For [writeFileStreamWith](#writeFileStreamWith) this happens when the stream is
-    closed. Use it for data that must survive a crash, for example before renaming a temporary
-    file over the old one with [move](#move).
+`createNew` makes the write exclusive. The file is created, and the task fails with `"EEXIST"`
+([errorIsFileExists](#errorIsFileExists)) if anything already exists at the path. The operating
+system checks and creates in one step (`O_EXCL`), so of two programs creating the same file at
+most one succeeds.
+
+`sync` makes the write durable. The file's data is flushed to the storage device (`fsync`) before
+the write succeeds; for [writeFileStreamWith](#writeFileStreamWith), before closing the stream
+succeeds.
+
+Neither replaces a file in one step. Without `createNew`, [writeFileWith](#writeFileWith) empties
+an existing file before writing, so a failure part way leaves it empty or partly written. To
+replace a file in one step, write a new file with `sync` and [move](#move) it over the old one.
 
 -}
 type alias WriteOptions =
@@ -452,17 +544,22 @@ type alias WriteOptions =
     }
 
 
-{-| Both options off: plain [writeFile](#writeFile) and [writeFileStream](#writeFileStream)
-behaviour.
+{-| Write options with both `createNew` and `sync` off, which give the behaviour of
+[writeFile](#writeFile) and [writeFileStream](#writeFileStream).
 -}
 defaultWriteOptions : WriteOptions
 defaultWriteOptions =
     Debug.todo "Implement System API"
 
 
-{-| Same as [writeFile](#writeFile), with [WriteOptions](#WriteOptions).
+{-| Writes the bytes into the file at the path, as [writeFile](#writeFile) does, with the
+[WriteOptions](#WriteOptions) given.
 
     FileSystem.writeFileWith { defaultWriteOptions | createNew = True, sync = True } bytes path
+
+With either option on, the file is opened (emptying an existing one, or failing with `"EEXIST"`
+for `createNew`), written from the beginning, flushed for `sync`, and closed. If a step after the
+open fails, closing the file is still attempted, and the first failure is the one reported.
 
 -}
 writeFileWith : WriteOptions -> Bytes -> Path -> Task Error Path
@@ -470,28 +567,32 @@ writeFileWith =
     Debug.todo "Implement System API"
 
 
-{-| Same as [writeFileStream](#writeFileStream), with [WriteOptions](#WriteOptions). With `sync`,
-closing the stream succeeds only once the data has reached the storage device.
+{-| Opens a stream into the file at the path, as [writeFileStream](#writeFileStream) does, with the
+[WriteOptions](#WriteOptions) given.
+
+With `sync`, closing the stream succeeds only once the data has been flushed to the storage
+device, and a failed flush fails the close. A cancelled stream is not flushed.
+
 -}
 writeFileStreamWith : WriteOptions -> WriteFileStreamMode -> Path -> Task Error (Stream.Writable Bytes)
 writeFileStreamWith =
     Debug.todo "Implement System API"
 
 
-{-| Make sure the given file is of a specific length. If the file is smaller than
-the given length, zeroes are added to the file until it is the correct length. If the file
-is larger than the given length, the excess bytes are removed.
+{-| Sets the length of the file at the path, in bytes: a longer file loses the bytes past
+`length`, and a shorter one is extended with zero bytes. The file must already exist.
 -}
 truncateFile : Int -> Path -> Task Error Path
 truncateFile =
     Debug.todo "Implement System API"
 
 
-{-| Remove the file or directory at the given path.
+{-| Removes the entity at the path.
 
-  - `recursive` will delete a directory and everything in it.
-
-Removing a directory with `recursive = False` fails with the error code `"ERR_FS_EISDIR"`.
+A symbolic link is removed itself, not the entity it points to. A directory is removed only with
+`recursive = True`, and then together with everything in it. With `recursive = False` it fails
+with the code `"ERR_FS_EISDIR"`, for which [errorIsDirectoryFound](#errorIsDirectoryFound) is
+`False`.
 
 -}
 remove : { recursive : Bool } -> Path -> Task Error Path
@@ -499,18 +600,26 @@ remove =
     Debug.todo "Implement System API"
 
 
-{-| List the contents of a directory. The returned [Paths](Path#Path) are relative to
-the directory being listed. Entries are sorted by name, byte by byte.
+{-| Returns the entries of the directory at the path, without `.` and `..`, sorted by name byte by
+byte (as UTF-8).
+
+Each `path` is the entry's name alone, relative to the listed directory, parsed with
+[Path.fromPosixString](Path#fromPosixString). A name that parsing changes, such as `a.`, which
+comes back as `a`, therefore does not name its entry once appended to the directory's path.
+
+Each `entityType` is that of the entry itself: a symbolic link is `Symlink`, not followed.
+
 -}
 listDirectory : Path -> Task Error (List { path : Path, entityType : EntityType })
 listDirectory =
     Debug.todo "Implement System API"
 
 
-{-| Create a new directory at the given [Path](Path#Path).
+{-| Creates a directory at the path.
 
-If `recursive` is `True`, then a directory will be created for every section of the
-given [Path](Path#Path).
+With `recursive = False` the parent directory must exist, and the task fails with `"EEXIST"` if
+something is already at the path. With `recursive = True` every missing directory on the path is
+created too, and a directory already at the path is not an error.
 
 -}
 makeDirectory : { recursive : Bool } -> Path -> Task Error Path
@@ -518,11 +627,11 @@ makeDirectory =
     Debug.todo "Implement System API"
 
 
-{-| Create a directory, prefixed by a given name, that ends up in a section of the
-file system reserved for temporary files (see [tempDirectory](#tempDirectory)). You're given the
-[Path](Path#Path) to this new directory.
+{-| Creates a new directory in [tempDirectory](#tempDirectory), named `prefix` followed by six
+random characters, and succeeds with its path. Each call creates a different directory.
 
-A few random characters are added after the prefix, so every call creates a new directory.
+If it fails, [errorPath](#errorPath) is [tempDirectory](#tempDirectory) with `prefix` appended,
+without the random characters.
 
 -}
 makeTempDirectory : String -> Task Error Path
@@ -530,13 +639,12 @@ makeTempDirectory =
     Debug.todo "Implement System API"
 
 
-{-| Creates a hard link from the second [Path](Path#Path) to the first.
+{-| Creates a hard link at the first path to the file at the second.
 
     hardLink linkPath targetPath
 
-A hard link is an alias for a specific location. The link has the same
-ownership and access permissions, and it's impossible to tell which is
-the "real" entity and which is the link.
+A hard link is a second name for the same file, and neither name is the original. The task
+succeeds with the link path, and if it fails, [errorPath](#errorPath) is the link path.
 
 -}
 hardLink : Path -> Path -> Task Error Path
@@ -544,13 +652,14 @@ hardLink =
     Debug.todo "Implement System API"
 
 
-{-| Creates a soft link from the second [Path](Path#Path) to the first.
+{-| Creates a soft link at the first path that points to the second.
 
     softLink linkPath targetPath
 
-A soft link, also known as a symbolic link or symlink, is a special file
-that contains the path to some other location. Resolving a soft link will
-redirect to this other location.
+A soft link, also called a symbolic link, is a special file holding the path of another
+location, which is followed when the link is resolved. The target is stored as the text
+[Path.toPosixString](Path#toPosixString) prints and is not checked, so it need not exist. The
+task succeeds with the link path, and if it fails, [errorPath](#errorPath) is the link path.
 
 -}
 softLink : Path -> Path -> Task Error Path
@@ -558,28 +667,38 @@ softLink =
     Debug.todo "Implement System API"
 
 
-{-| Returns the [Path](Path#Path) pointed to by a soft link.
+{-| Returns the path stored in the soft link at the path.
+
+The stored text is parsed with [Path.fromPosixString](Path#fromPosixString), so the result may
+not print back as the stored text. It is not resolved against the link's directory.
+
 -}
 readLink : Path -> Task Error Path
 readLink =
     Debug.todo "Implement System API"
 
 
-{-| Removes a link, hard or soft, from the file system. If the
-[Path](Path#Path) refers to a file, the file is removed.
+{-| Removes the name at the path, which may name anything but a directory. A soft link is removed
+itself, not the entity it points to; [remove](#remove) removes a directory.
 -}
 unlink : Path -> Task Error Path
 unlink =
     Debug.todo "Implement System API"
 
 
-{-| Represents a change within a watched directory.
+{-| A change seen by [watch](#watch) or [watchRecursive](#watchRecursive).
 
-  - `Changed` means that the contents of a file has changed in some way.
-  - `Moved` means that an entity has been added or removed. A rename is usually two `Moved` events.
+`Changed` means an entity's contents or attributes changed, such as a write to a file or a change
+of its permissions.
 
-On most operating systems, each event will be associated with a [Path](Path#Path)
-relative to the watched directory, but some operating systems will not provide that information.
+`Moved` means an entity was created, deleted or renamed. A rename is usually two `Moved` events,
+one for the old name and one for the new. On the JS backend under Linux, a change to a
+directory's attributes is also reported as `Moved`.
+
+An event about another entity carries that entity's path, relative to the watched path (on the JS
+backend, when Node.js reports one). An event about the watched path itself carries `Nothing` on
+the native backend; on the JS backend it can carry the watched entry's own name instead, so a
+change to a watched file `f.txt` carries the path `f.txt`.
 
 -}
 type WatchEvent
@@ -587,25 +706,32 @@ type WatchEvent
     | Moved (Maybe Path)
 
 
-{-| This notifies your application every time there is a change within the directory
-represented by the given [Path](Path#Path).
+{-| Creates a subscription to the changes at the path: to the entity itself and, for a
+directory, to its entries, but not to anything inside its subdirectories.
+
+A path that cannot be watched, such as one that does not exist, gives no events and no error.
+Subscriptions to the same path with the same recursiveness share one watcher, and each event
+goes to all of them.
+
 -}
 watch : (WatchEvent -> msg) -> Path -> Sub msg
 watch =
     Debug.todo "Implement System API"
 
 
-{-| Same as [watch](#watch), but this will also watch for changes in sub-directories.
+{-| Creates a subscription like [watch](#watch), which also reports changes anywhere inside the
+directory's subdirectories.
 -}
 watchRecursive : (WatchEvent -> msg) -> Path -> Sub msg
 watchRecursive =
     Debug.todo "Implement System API"
 
 
-{-| Find the [Path](Path#Path) that represents the home directory of the current user.
+{-| The home directory of the current user.
 
-This is `$HOME` when it is set, and otherwise the home directory recorded for the user in the
-system's user database.
+It is `$HOME` when that is set and not empty, otherwise the home directory recorded for the user
+in the system's user database (natively on Windows, `%USERPROFILE%`), and
+[Path.empty](Path#empty) when there is none.
 
 -}
 homeDirectory : Task x Path
@@ -613,21 +739,18 @@ homeDirectory =
     Debug.todo "Implement System API"
 
 
-{-| Returns the current working directory of the program.
-
-This is the directory that all relative paths are relative to, and is usually the
-directory that the program was executed from.
-
+{-| The program's current working directory, which the operating system resolves relative paths
+against. It is [Path.empty](Path#empty) if the directory cannot be read.
 -}
 currentWorkingDirectory : Task x Path
 currentWorkingDirectory =
     Debug.todo "Implement System API"
 
 
-{-| Find a [Path](Path#Path) that represents a directory meant to hold temporary files.
+{-| The directory meant for temporary files.
 
-This is the first of the `TMPDIR`, `TMP` and `TEMP` environment variables that is set, and
-`/tmp` otherwise.
+It is the first of the `TMPDIR`, `TMP` and `TEMP` environment variables that is set and not
+empty, and otherwise `/tmp` (`C:/Windows/Temp` on Windows).
 
 -}
 tempDirectory : Task x Path
@@ -635,8 +758,12 @@ tempDirectory =
     Debug.todo "Implement System API"
 
 
-{-| [Path](Path#Path) to a file which is always empty. Anything written to this file
-will be discarded.
+{-| The path of the null device, `/dev/null`, which reads as empty and discards whatever is
+written to it.
+
+On Windows the kernels report `//./nul`, which [Path.fromPosixString](Path#fromPosixString)
+parses into `/nul`, a path that does not name the null device.
+
 -}
 devNull : Task x Path
 devNull =

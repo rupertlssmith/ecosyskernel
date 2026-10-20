@@ -5,28 +5,44 @@ module Http.Stream exposing
     , task, Resolver, streamResolver
     )
 
-{-| Send HTTP requests whose bodies are streams.
+{-| Lets a program send HTTP requests whose bodies are streams, so that it can upload or
+download something large, or something that arrives slowly, without holding all of it in
+memory.
 
-This module extends [`elm/http`](/packages/elm/http/latest) with streaming: a request body can
-be a [`Stream.Readable`](Stream#Readable) that is uploaded as it is read, and the response body
-always arrives as a `Stream.Readable Bytes` that you can read chunk by chunk while it downloads.
-Use it for large downloads and uploads, or for responses that arrive slowly over time.
+This module extends [`elm/http`](/packages/elm/http/latest). A request body can be a
+[`Stream.Readable`](Stream#Readable) of bytes, sent as it is read, and a response body can be
+handed to the program as a `Stream.Readable Bytes`, to be read chunk by chunk while it
+downloads. Everything that is not about streams stays elm/http's: headers are made with
+`Http.header`, and results are elm/http's `Http.Error`, `Http.Metadata` and `Http.Response`.
+This module has its own [`Body`](#Body), [`Expect`](#Expect) and [`Resolver`](#Resolver)
+types, and its own [`request`](#request) and [`task`](#task), shaped like elm/http's.
 
-Everything that is not about streams stays elm/http's: headers are built with `Http.header`, and
-errors and responses are elm/http's `Http.Error`, `Http.Metadata` and `Http.Response`. This module
-has its own [`Body`](#Body), [`Expect`](#Expect) and [`Resolver`](#Resolver) types, and its own
-[`request`](#request) and [`task`](#task) functions shaped like elm/http's.
+A request has two stages, and a failure is reported differently in each. Until the headers of
+the final response arrive, the request itself can fail, with `Http.BadUrl`, `Http.Timeout` or
+`Http.NetworkError`. Once they have arrived the response is handed over. A failure after that
+point, such as the connection closing before the body is complete, reaches the body stream
+instead: once the bytes already received have been read, a read of the body fails with
+`Stream.Cancelled` and a reason that begins `"network error: "`.
 
 Differences from elm/http:
 
-  - The `timeout` covers only the wait for the response headers. Once the headers have arrived
-    the body may take as long as it needs, since a stream can be arbitrarily long.
+  - A URL with a scheme other than `http:` or `https:` fails with `Http.BadUrl`. A URL with no
+    scheme fails with `Http.BadUrl` on the JavaScript backend.
+  - The `timeout` covers everything up to the arrival of the final response's headers,
+    including connecting, following redirects and sending the body. Once the headers have
+    arrived the body may take as long as it needs.
   - There is no `tracker`, so `Http.track` and `Http.cancel` do not apply. To cancel a request,
-    run it with [`task`](#task) in a process started with `Process.spawn` and stop it with
-    `Process.kill`.
-  - Response header names are lower-cased. If a header appears more than once its values are
-    joined with `", "`, as in elm/http. After redirects, `Metadata.url` is the final URL and
-    the headers are those of the final response.
+    run it with [`task`](#task) in a process started with `Process.spawn`, and stop it with
+    `Process.kill` before the response headers arrive. After that, cancel the body stream
+    with `Stream.cancelReadable`, which stops a transfer still running. While a read is
+    waiting on the body stream, or a pipe is reading it, `cancelReadable` fails with `Locked`
+    and does nothing.
+  - Redirects are followed, at most 20 of them; one more fails with `Http.NetworkError`, and a
+    redirect to a URL that is not `http:` or `https:` fails with `Http.BadUrl` carrying the URL
+    of the request. The status, headers and `Metadata.url` are those of the final response.
+
+Response header names are lower-cased, and a header that appears more than once has its values
+joined with `", "` in the order they arrived, as elm/http joins them.
 
 
 # Requests
@@ -58,8 +74,8 @@ import Stream
 import Task exposing (Task)
 
 
-{-| Create a custom request whose response body is a stream. For example, to download a large
-file:
+{-| Sends a request and turns its response into a message, as `expect` says. For example, to
+download a large file:
 
     import Bytes exposing (Bytes)
     import Http
@@ -80,8 +96,14 @@ file:
             , timeout = Nothing
             }
 
-It lets you set custom `headers` as needed. The `timeout` is the number of milliseconds you are
-willing to wait for the response headers before giving up; `Nothing` means no timeout.
+The `timeout` is how many milliseconds to wait for the final response's headers before the
+request fails with `Http.Timeout`. It is rounded to whole milliseconds, at least 1, and
+`Nothing`, or a value of 0 or less, means no timeout. On the JavaScript backend a timeout above
+2147483647 milliseconds fails the request after 1 millisecond.
+
+A header in `headers` whose name is empty or holds a CR, LF or `:`, or whose value holds a CR or
+LF, is not sent. On the JavaScript backend a header that Node rejects, such as one whose name holds
+a space, is not sent either.
 
 -}
 request :
@@ -97,24 +119,37 @@ request =
     Debug.todo "Implement System API"
 
 
-{-| Represents the body of a request made with this module.
+{-| The body of a request made with this module: nothing, a block of bytes, or a stream.
+
+A body other than [`emptyBody`](#emptyBody) carries a MIME type, and a non-empty MIME type is
+sent as the `Content-Type` header, unless it holds a CR or LF (or, on the JavaScript backend,
+something else Node rejects in a header value). An empty MIME type adds no `Content-Type` header
+on the JavaScript backend; on the native backend libcurl can add
+`Content-Type: application/x-www-form-urlencoded` in its place. A body is made with
+[`emptyBody`](#emptyBody), [`stringBody`](#stringBody), [`jsonBody`](#jsonBody),
+[`bytesBody`](#bytesBody) or [`streamBody`](#streamBody).
+
 -}
 type Body
     = Body
 
 
-{-| Create an empty body for your request. This is useful for GET requests and POST requests
-where you are not sending any data.
+{-| A body with nothing in it, and no MIME type, so it adds no `Content-Type` header of its own.
+On the native backend libcurl can still add `Content-Type: application/x-www-form-urlencoded`
+to a `POST`.
 -}
 emptyBody : Body
 emptyBody =
     Debug.todo "Implement System API"
 
 
-{-| Put some string in the body of your request. It is sent encoded as UTF-8.
+{-| Makes a body holding `value` encoded as UTF-8, sent with the
+[MIME type](https://en.wikipedia.org/wiki/Media_type) `mimeType` as its `Content-Type` (an empty
+`mimeType` is treated as [`Body`](#Body) describes).
 
-The first argument is a [MIME type](https://en.wikipedia.org/wiki/Media_type) of the body, which
-is sent as the `Content-Type` header. Some servers are strict about this!
+A lone surrogate in `value` is not valid in UTF-8, and the two backends differ: it is sent as
+U+FFFD (the bytes `EF BF BD`) on the JavaScript backend, and in its 3-byte surrogate form on the
+native backend.
 
 -}
 stringBody : String -> String -> Body
@@ -122,23 +157,22 @@ stringBody =
     Debug.todo "Implement System API"
 
 
-{-| Put some JSON value in the body of your request. This will automatically add the
-`Content-Type: application/json` header.
+{-| Makes a body holding `value` as JSON text with no whitespace, sent with
+`Content-Type: application/json`.
 -}
 jsonBody : Json.Encode.Value -> Body
 jsonBody =
     Debug.todo "Implement System API"
 
 
-{-| Put some `Bytes` in the body of your request. This allows you to use
-[`elm/bytes`](/packages/elm/bytes/latest) to have full control over the binary representation
-of the data you are sending. For example, you could send an `archive.zip` file like this:
+{-| Makes a body holding `bytes`, sent with the
+[MIME type](https://en.wikipedia.org/wiki/Media_type) `mimeType` as its `Content-Type` (an empty
+`mimeType` is treated as [`Body`](#Body) describes). For example, to send an `archive.zip` file
+made with [`elm/bytes`](/packages/elm/bytes/latest):
 
-    zipBody : Bytes -> Body
+    zipBody : Bytes -> Http.Stream.Body
     zipBody bytes =
         Http.Stream.bytesBody "application/zip" bytes
-
-The first argument is a [MIME type](https://en.wikipedia.org/wiki/Media_type) of the body.
 
 -}
 bytesBody : String -> Bytes -> Body
@@ -146,8 +180,10 @@ bytesBody =
     Debug.todo "Implement System API"
 
 
-{-| Use a readable stream of bytes as the body of your request. The stream is uploaded as it is
-read, so you can send something large, like a file, without holding it all in memory:
+{-| Makes a body that sends what is read from a stream, sent with the
+[MIME type](https://en.wikipedia.org/wiki/Media_type) `mimeType` as its `Content-Type` (an empty
+`mimeType` is treated as [`Body`](#Body) describes). The stream is sent as it is read, so
+something large, like a file, can be sent without holding it all in memory:
 
     upload : Stream.Readable Bytes -> Cmd Msg
     upload fileStream =
@@ -160,9 +196,21 @@ read, so you can send something large, like a file, without holding it all in me
             , timeout = Nothing
             }
 
-The first argument is a [MIME type](https://en.wikipedia.org/wiki/Media_type) of the body. The
-stream is locked while the request consumes it. No `Content-Length` is sent, so the body uses
-chunked transfer encoding. If the stream is cancelled, the request fails with a network error.
+The end of the stream is the end of the body. The request reads the stream through a pipe, so
+the stream is locked, as [`Stream`](Stream) describes, while the request runs. A stream that is
+already locked when the request is sent makes the request fail at once with `Http.NetworkError`
+(on the JavaScript backend, a bad URL is reported first).
+
+If the stream fails, because it is cancelled from its writing side or the resource behind it
+fails, a transfer still running is stopped: before the response headers the request fails with
+`Http.NetworkError`, and after them a read of the response body fails with `Stream.Cancelled`.
+If instead the transfer ends before the whole stream has been sent (the response is complete,
+the request has failed, or it was stopped), the rest is not sent, and the stream is cancelled,
+at the latest when it next has a value to send. A 307 or 308 redirect fails with
+`Http.NetworkError`, because a stream cannot be sent twice. Other redirects differ between
+backends: on the JavaScript backend a 303, or a 301 or 302 after a `POST`, is followed as a `GET`
+without a body and any other fails with `Http.NetworkError`; on the native backend such a request
+can wait until its `timeout`, so set one.
 
 -}
 streamBody : String -> Stream.Readable Bytes -> Body
@@ -170,22 +218,23 @@ streamBody =
     Debug.todo "Implement System API"
 
 
-{-| Logic for interpreting a response body, as with elm/http's `Http.Expect`. Here the body is
-always delivered as a stream.
+{-| How a [`request`](#request) turns its response into a message, as elm/http's `Http.Expect`
+does. One is made with [`expectStream`](#expectStream), which keeps only a successful response's
+body, or [`expectStreamResponse`](#expectStreamResponse), which keeps the body of every response.
 -}
 type Expect msg
     = Expect
 
 
-{-| Expect the response body as a readable stream of bytes, together with the response
-metadata.
+{-| Makes an [`Expect`](#Expect) that gives `toMsg` the response's metadata and its body
+stream when the status code is in 200–299.
 
-If the server responds with a status code outside 200–299 you get `Err (Http.BadStatus code)` and
-the response body is discarded. You also get `Http.BadUrl`, `Http.Timeout` or
-`Http.NetworkError` when the request fails before the response headers arrive. A network error
-after that point reaches the body stream instead, and reading it fails with `Stream.Cancelled`.
+A status code outside 200–299 gives `Err (Http.BadStatus code)`, and the body is not downloaded:
+the transfer is stopped as soon as the headers have arrived. A request that fails before the
+headers arrive gives `Http.BadUrl`, `Http.Timeout` or `Http.NetworkError`.
 
-Read the body to the end, or cancel it with `Stream.cancelReadable` when you no longer need it.
+Read the body to the end, or cancel it with `Stream.cancelReadable` once it is no longer needed.
+Only about 256 KiB of unread body is held, so a larger body left unread keeps the transfer open.
 
 -}
 expectStream : (Result Http.Error ( Http.Metadata, Stream.Readable Bytes ) -> msg) -> Expect msg
@@ -193,11 +242,11 @@ expectStream =
     Debug.todo "Implement System API"
 
 
-{-| Expect an `Http.Response` with a stream body.
+{-| Makes an [`Expect`](#Expect) that turns the whole `Http.Response` into a result with
+`toResult` and gives that to `toMsg`, as elm/http's `Http.expectBytesResponse` does.
 
-It works just like elm/http's `Http.expectBytesResponse`, giving you access to the headers and
-leeway in defining your own errors. Unlike [`expectStream`](#expectStream), every status code
-comes with its real body stream, so you can read the error body of, say, a 404 response.
+Unlike [`expectStream`](#expectStream), a response of any status code comes with its body
+stream, so the body of, say, a 404 response can be read.
 
 -}
 expectStreamResponse : (Result x a -> msg) -> (Http.Response (Stream.Readable Bytes) -> Result x a) -> Expect msg
@@ -205,11 +254,15 @@ expectStreamResponse =
     Debug.todo "Implement System API"
 
 
-{-| Just like [`request`](#request), but it creates a `Task`. This makes it possible to chain
-the request with other tasks, for example opening a file stream first and then uploading it.
+{-| Makes a `Task` that sends the request, as [`request`](#request) does, and succeeds or fails
+with what `resolver` makes of the response. A task can be chained with other tasks, for
+example opening a file stream first and then uploading it.
 
-A task is also the way to cancel a request: start it with `Process.spawn` and stop it with
-`Process.kill`, which aborts the transfer and cancels the body stream.
+A task is also the way to cancel a request: run it in a process started with `Process.spawn`,
+and stop that process with `Process.kill` before the response headers arrive, which stops the
+transfer. Killing the process after the task has received the response does not stop the
+transfer; cancel the body stream with `Stream.cancelReadable` instead (which fails with
+`Locked` while a read is waiting on the body stream, or a pipe is reading it).
 
 -}
 task :
@@ -225,16 +278,16 @@ task =
     Debug.todo "Implement System API"
 
 
-{-| Describes how to resolve an HTTP task. You can create a resolver with
-[`streamResolver`](#streamResolver).
+{-| How a [`task`](#task) turns its response into the task's result: success with an `a`, or
+failure with an `x`. One is made with [`streamResolver`](#streamResolver).
 -}
 type Resolver x a
     = Resolver
 
 
-{-| Turn a response with a stream body into a result. Similar to
-[`expectStreamResponse`](#expectStreamResponse), every status code comes with its real body
-stream.
+{-| Makes a [`Resolver`](#Resolver) that turns the `Http.Response` into the task's result with
+`toResult`. As with [`expectStreamResponse`](#expectStreamResponse), a response of any status
+code comes with its body stream.
 -}
 streamResolver : (Http.Response (Stream.Readable Bytes) -> Result x a) -> Resolver x a
 streamResolver =

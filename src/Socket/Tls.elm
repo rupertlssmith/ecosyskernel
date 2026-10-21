@@ -1,7 +1,8 @@
 module Socket.Tls exposing
     ( ClientOptions, Verification(..), defaultClientOptions, connect
     , ServerOptions, listen
-    , Info, info
+    , Info, TlsVersion(..), info
+    , Error(..), Problem(..), CertificateProblem(..), errorToString, fromStreamFailure
     )
 
 {-| TLS (Transport Layer Security) encrypts a TCP connection and lets a client check that it is
@@ -43,12 +44,18 @@ A server [`listen`](#listen)s and gets its connections from [`Socket.accept`](So
 connection reaches that rule only once its handshake has succeeded, so a client whose handshake
 is slow can be overtaken by clients that connected after it.
 
-A certificate that fails verification makes `connect` fail with a verification code such as
-`"CERT_HAS_EXPIRED"` or `"ERR_TLS_CERT_ALTNAME_INVALID"`, which
-[`Socket.errorIsCertificateInvalid`](Socket#errorIsCertificateInvalid) recognises. Most other
-TLS failures have codes starting with `"ERR_SSL_"`, and a server that closes the connection
-during the handshake usually gives `"ECONNRESET"`. Once a connection has been made, failures to
-read or write arrive on its streams, as for any connection.
+TLS is a protocol layered on a TCP connection, so this module has its own
+[`Error`](#Error), which says in which layer a failure happened. A failure of the TCP connection
+underneath is a `SocketError` holding a [`Socket.Error`](Socket#Error), as `Socket.Tcp` would
+report it; a failure of TLS itself is a `TlsError` holding a [`Problem`](#Problem). A certificate
+that fails verification makes `connect` fail with
+`TlsError (CertificateRejected problem)`, where the
+[`CertificateProblem`](#CertificateProblem) says what was wrong with it. A server that closes the
+connection during the handshake is a failure of the connection, not of TLS: a `SocketError`
+whose kind is [`Socket.ConnectionReset`](Socket#ErrorKind).
+
+Once a connection has been made, failures to read or write arrive on its streams, as for any
+connection, and [`fromStreamFailure`](#fromStreamFailure) reads them back as an `Error`.
 
 
 ## Clients
@@ -63,12 +70,18 @@ read or write arrive on its streams, as for any connection.
 
 ## Connection information
 
-@docs Info, info
+@docs Info, TlsVersion, info
+
+
+## Errors
+
+@docs Error, Problem, CertificateProblem, errorToString, fromStreamFailure
 
 -}
 
 import Socket
 import Socket.Tcp
+import Stream
 import Task exposing (Task)
 
 
@@ -84,7 +97,8 @@ nothing is checked, though a DNS name is still sent.
 
 `alpn` is the list of protocols to offer, such as `[ "h2", "http/1.1" ]`, and `[]` offers none.
 The server chooses which one is used, and [`info`](#info) reports it. Each name must be 1 to 255
-bytes of UTF-8, or `connect` fails with `EINVAL`.
+bytes of UTF-8, or `connect` fails with a `SocketError` whose kind is
+[`Socket.InvalidInput`](Socket#ErrorKind).
 
 -}
 type alias ClientOptions =
@@ -108,8 +122,8 @@ when a connection first needs them, not for every connection.
 `TrustedCertificates pem` trusts only the PEM-encoded certificates in `pem`, which may hold one
 or more; the system's authorities are not consulted. On the native backend, reading stops at the
 first certificate block that cannot be read, and the certificates after it are not trusted. When
-no certificate can be read from `pem`, `connect` fails with a code starting `"ERR_SSL_"` before it
-contacts the server.
+no certificate can be read from `pem`, `connect` fails with
+`TlsError (CertificateUnusable reason)` before it contacts the server.
 
 `NoVerification` accepts any certificate and checks no name. The connection is encrypted, but
 the server is not authenticated, so anyone able to intercept the connection can pose as it. It
@@ -133,15 +147,20 @@ defaultClientOptions =
 {-| Opens a TCP connection and secures it with TLS, succeeding once the handshake has finished
 and, unless verification is off, the server's certificate has been accepted.
 
-The TCP side is made from the same options as by `Socket.Tcp.connect`, and fails in the same ways.
-Its `timeout` covers the handshake too: the task fails with `ETIMEDOUT` when connecting and the
+The TCP side is made from the same options as by `Socket.Tcp.connect`, and fails in the same
+ways, as a `SocketError`. Its `timeout` covers the handshake too: the task fails with a
+`SocketError` whose kind is [`Socket.TimedOut`](Socket#ErrorKind) when connecting and the
 handshake together take longer. The `alpn` names, and the certificates of `TrustedCertificates`,
 are checked before anything connects, so a problem with them fails the task without contacting
-the server. A rejected certificate fails it with a code that
-[`Socket.errorIsCertificateInvalid`](Socket#errorIsCertificateInvalid) recognises.
+the server.
+
+A failure of TLS itself is a `TlsError`: `CertificateRejected` when the server's certificate is
+rejected, and `HandshakeFailed` when the handshake fails for another reason, for example when the
+two ends share no TLS version or cipher. A server that closes the connection during the handshake
+is a `SocketError` with the kind [`Socket.ConnectionReset`](Socket#ErrorKind).
 
 -}
-connect : ClientOptions -> Socket.Tcp.ConnectOptions -> Task Socket.Error Socket.Connection
+connect : ClientOptions -> Socket.Tcp.ConnectOptions -> Task Error Socket.Connection
 connect =
     Debug.todo "Implement System API"
 
@@ -169,42 +188,160 @@ type alias ServerOptions =
 
 {-| Starts listening for TLS connections, succeeding with the listener once it is bound and
 listening. The TCP side is set up from the same options as by `Socket.Tcp.listen`, and fails in
-the same ways.
+the same ways, as a `SocketError`.
 
 The certificate, the key, and whether the two belong together are checked before anything
-listens. When they cannot be used, the task fails, usually with a code starting `"ERR_SSL_"`. An
-`alpn` name that is empty or longer than 255 bytes fails it with `EINVAL`.
+listens. When they cannot be used, the task fails with `TlsError (CertificateUnusable reason)`.
+An `alpn` name that is empty or longer than 255 bytes fails it with a `SocketError` whose kind
+is [`Socket.InvalidInput`](Socket#ErrorKind).
 
 A client whose handshake fails, or has not finished after 120 seconds, is closed without being
 handed to the program. On the native backend at most 64 handshakes are under way at once on one
 listener; further clients wait in the operating system's listen queue.
 
 -}
-listen : ServerOptions -> Socket.Tcp.ListenOptions -> Task Socket.Error Socket.Listener
+listen : ServerOptions -> Socket.Tcp.ListenOptions -> Task Error Socket.Listener
 listen =
     Debug.todo "Implement System API"
 
 
-{-| What a connection's TLS handshake agreed on, in OpenSSL's names.
+{-| What a connection's TLS handshake agreed on.
 
-`protocol` is the TLS version, such as `"TLSv1.3"`, not the application protocol, which is
-`alpn`. `alpn` is `Nothing` when no application protocol was agreed. `cipher` is the cipher
-suite, such as `"TLS_AES_256_GCM_SHA384"`.
+`version` is the TLS version, a [`TlsVersion`](#TlsVersion). `alpn` is the application
+protocol agreed, such as `Just "h2"`, and `Nothing` when none was agreed. `cipher` is the cipher
+suite, in OpenSSL's name, such as `"TLS_AES_256_GCM_SHA384"`.
 
 -}
 type alias Info =
-    { protocol : String
+    { version : TlsVersion
     , alpn : Maybe String
     , cipher : String
     }
 
 
-{-| Returns what the handshake of a TLS connection agreed on.
+{-| A TLS version, as the handshake agreed on it.
 
-Fails with `EINVAL` for a connection that is not a TLS connection. Once the connection has ended,
-it may fail with `EINVAL` as well.
+The backends report the version by its OpenSSL name, and the names map to the cases as follows:
+
+  - `Tls1_0`: `"TLSv1"`;
+  - `Tls1_1`: `"TLSv1.1"`;
+  - `Tls1_2`: `"TLSv1.2"`;
+  - `Tls1_3`: `"TLSv1.3"`;
+  - `UnknownTlsVersion name`: any other name, as it was reported.
 
 -}
-info : Socket.Connection -> Task Socket.Error Info
+type TlsVersion
+    = Tls1_0
+    | Tls1_1
+    | Tls1_2
+    | Tls1_3
+    | UnknownTlsVersion String
+
+
+{-| Returns what the handshake of a TLS connection agreed on.
+
+Fails with a `SocketError` whose kind is [`Socket.InvalidInput`](Socket#ErrorKind) for a
+connection that is not a TLS connection. Once the connection has ended, it may fail in the same
+way.
+
+-}
+info : Socket.Connection -> Task Error Info
 info =
+    Debug.todo "Implement System API"
+
+
+{-| A failed TLS operation, by the layer it failed in.
+
+  - `SocketError error`: the TCP connection under TLS failed, or an argument of the TCP side
+    could not be used; `error` is a [`Socket.Error`](Socket#Error), whose
+    [`Socket.errorKind`](Socket#errorKind) says what went wrong, as for `Socket.Tcp`. A peer
+    that drops the connection during the handshake is a `SocketError` with the kind
+    [`Socket.ConnectionReset`](Socket#ErrorKind).
+  - `TlsError problem`: TLS itself failed; the [`Problem`](#Problem) says how.
+
+Only failures produced by TLS itself, such as a certificate check or an error that the TLS
+library reports, are a `TlsError`.
+
+-}
+type Error
+    = SocketError Socket.Error
+    | TlsError Problem
+
+
+{-| How TLS itself failed.
+
+  - `CertificateRejected problem`: `connect` rejected the server's certificate; the
+    [`CertificateProblem`](#CertificateProblem) says why.
+  - `CertificateUnusable reason`: certificates or a key given to this module cannot be used: the
+    `certificateChain` or `privateKey` of [`listen`](#listen), the two not belonging together, or
+    the certificates of `TrustedCertificates` for `connect`. `reason` is the TLS library's reason
+    in upper case with underscores, such as `"NO_CERTIFICATES"`; the backend reports it as the
+    code `ERR_SSL_<reason>`.
+  - `HandshakeFailed reason`: the handshake, or the TLS layer of an open connection, failed for
+    another reason, such as the two ends sharing no TLS version or cipher. `reason` is the TLS
+    library's reason as for `CertificateUnusable`, or `"UNKNOWN"` when the library gave none.
+
+The reasons stay text because the TLS library has hundreds of them.
+
+-}
+type Problem
+    = CertificateRejected CertificateProblem
+    | CertificateUnusable String
+    | HandshakeFailed String
+
+
+{-| Why a client rejected a server's certificate. The code each case stands for, as the backends
+report it, is in parentheses.
+
+  - `Expired`: the certificate has expired (CERT_HAS_EXPIRED).
+  - `NotYetValid`: the certificate is not valid yet (CERT_NOT_YET_VALID).
+  - `Revoked`: the certificate was revoked (CERT_REVOKED).
+  - `SelfSigned`: the certificate is self-signed and not trusted
+    (DEPTH_ZERO_SELF_SIGNED_CERT).
+  - `SelfSignedInChain`: the chain ends in a self-signed certificate that is not trusted
+    (SELF_SIGNED_CERT_IN_CHAIN).
+  - `IssuerNotTrusted`: the certificate of the authority that signed it is not available or not
+    trusted (UNABLE_TO_GET_ISSUER_CERT_LOCALLY).
+  - `LeafNotVerifiable`: the server's own certificate cannot be verified, usually because the
+    server did not send the intermediate certificates (UNABLE_TO_VERIFY_LEAF_SIGNATURE).
+  - `NameMismatch`: the certificate does not name the `serverName` connected to, as a DNS name
+    or an IP address (ERR_TLS_CERT_ALTNAME_INVALID).
+  - `VerificationFailed`: verification failed for another reason (CERT_VERIFY_FAILED on the
+    native backend; on the JavaScript backend, any other verification code Node reports).
+
+-}
+type CertificateProblem
+    = Expired
+    | NotYetValid
+    | Revoked
+    | SelfSigned
+    | SelfSignedInChain
+    | IssuerNotTrusted
+    | LeafNotVerifiable
+    | NameMismatch
+    | VerificationFailed
+
+
+{-| Returns a description of the error for people to read. For a `SocketError` it is that of
+[`Socket.errorToString`](Socket#errorToString); for a `TlsError` it is the code the backend
+reported, `": "`, and the TLS library's message.
+-}
+errorToString : Error -> String
+errorToString =
+    Debug.todo "Implement System API"
+
+
+{-| Reads the failure of a TLS connection's stream back as an [`Error`](#Error), or returns
+`Nothing` for a failure that some other kind of stream made.
+
+A read or write on the streams of a TLS connection that fails because of the connection fails
+with `Stream.Failed`. This gives a `TlsError` when TLS itself failed, for example with
+`HandshakeFailed` when the peer sent data TLS cannot accept, and a `SocketError` when the
+connection under TLS failed, with the same [`Socket.Error`](Socket#Error) that
+[`Socket.fromStreamFailure`](Socket#fromStreamFailure) gives. One call covers both, so a
+program reading a TLS connection needs only this one.
+
+-}
+fromStreamFailure : Stream.Failure -> Maybe Error
+fromStreamFailure =
     Debug.todo "Implement System API"

@@ -65,7 +65,8 @@ options the connection starts with.
 
   - `timeout`, up to 2147483647 (about 24.8 days), is the most time, in milliseconds, to wait
     until the connection is established (and, for `Socket.Tls.connect`, until the TLS handshake
-    is done as well); the attempt then fails with `ETIMEDOUT`. `Nothing`, or `Just n` with
+    is done as well); the attempt then fails with
+    [`Socket.TimedOut`](Socket#ErrorKind). `Nothing`, or `Just n` with
     `n <= 0`, waits as long as the operating system does.
   - `noDelay = True` turns Nagle's algorithm off (`TCP_NODELAY`), so small writes are sent at
     once.
@@ -99,8 +100,9 @@ defaultConnectOptions =
 
     Socket.Tcp.connect (Socket.Tcp.defaultConnectOptions (Address.loopback IPv4) 8080)
 
-Fails with, for example, `ECONNREFUSED` when nothing listens there, or `ETIMEDOUT` when the
-`timeout` has passed.
+Fails with, for example, [`Socket.ConnectionRefused`](Socket#ErrorKind) when nothing listens
+there, [`Socket.TimedOut`](Socket#ErrorKind) when the `timeout` has passed, or
+[`Socket.NetworkUnreachable`](Socket#ErrorKind) when no route leads to the address.
 
 -}
 connect : ConnectOptions -> Task Socket.Error Socket.Connection
@@ -116,7 +118,7 @@ Text that [`Socket.Address.fromString`](Socket-Address#fromString) reads as an a
 [`Socket.lookup`](Socket#lookup), and a failed lookup fails the task with its error. The
 addresses found are tried one after the other, in the order `lookup` returns them, until one
 connects. If every attempt fails, the task fails with the last attempt's error; a name without
-addresses fails with `ENOTFOUND`.
+addresses fails with [`Socket.HostNotFound`](Socket#ErrorKind).
 
     Socket.Tcp.connectToHost "localhost" 8080
 
@@ -166,8 +168,10 @@ defaultListenOptions =
 
 
 {-| Starts listening for TCP connections, succeeding with the listener once it is bound and
-listening. Fails with, for example, `EADDRINUSE` when the address and port are taken, or `EACCES`
-for a privileged port.
+listening. Fails with, for example, [`Socket.AddressInUse`](Socket#ErrorKind) when the address
+and port are taken, [`Socket.PermissionDenied`](Socket#ErrorKind) for a privileged port, or
+[`Socket.AddressNotAvailable`](Socket#ErrorKind) for an address that does not belong to this
+machine.
 -}
 listen : ListenOptions -> Task Socket.Error Socket.Listener
 listen =

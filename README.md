@@ -10,8 +10,8 @@ an HTTP client, use [elm/http](https://package.elm-lang.org/packages/elm/http/la
 
 > **Status:** every module is implemented for Eco's native backend and tested on Linux. The macOS
 > code paths are written but not yet tested. Windows is not supported yet: the package is meant to
-> build there (untested), with most IO functions reporting `ENOTSUP` or stopping with a "not
-> supported on Windows yet" message. On the JS target (Node), every module works and passes the
+> build there (untested), with most IO functions failing with a not-supported error
+> (`NotSupported`) or stopping with a "not supported on Windows yet" message. On the JS target (Node), every module works and passes the
 > same tests as the native backend, with small documented differences (for example, error
 > descriptions use Node's wording). See `plans/eco-system-library.md` in the Eco repository for the design and the
 > remaining follow-ups.
@@ -27,6 +27,7 @@ an HTTP client, use [elm/http](https://package.elm-lang.org/packages/elm/http/la
   exclusive writes, file handles for random access, and paths.
 - `ChildProcess`: running and spawning child processes.
 - `Terminal`: terminal size, raw mode, the window title and resize events.
+- `Http.Method`: the HTTP method type, shared by `Http.Server` and `Http.Stream`.
 - `Http.Server`: an HTTP server (HTTP/1.1 with keep-alive, request limits and timeouts, HTTPS,
   HTTP/2 over TLS, and WebSocket upgrades) and its responses. `setBodyAsHtml` answers with a page
   built with elm/html, serialized straight into the response.

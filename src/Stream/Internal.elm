@@ -1,4 +1,4 @@
-module Stream.Internal exposing (Readable(..), Writable(..), Transformation(..))
+module Stream.Internal exposing (Readable(..), Writable(..), Transformation(..), Failure(..))
 
 {-| Opaque placeholder types for the documentation mock-up. Internal; not exposed.
 -}
@@ -14,3 +14,7 @@ type Writable value
 
 type Transformation input output
     = Transformation
+
+
+type Failure
+    = Failure

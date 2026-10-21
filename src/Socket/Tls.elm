@@ -323,8 +323,10 @@ type CertificateProblem
 
 
 {-| Returns a description of the error for people to read. For a `SocketError` it is that of
-[`Socket.errorToString`](Socket#errorToString); for a `TlsError` it is the code the backend
-reported, `": "`, and the TLS library's message.
+[`Socket.errorToString`](Socket#errorToString). For a `TlsError` it is the code the backend
+reports for the problem, `": "`, and a description of it, as in
+`"CERT_HAS_EXPIRED: the certificate has expired"` or
+`"ERR_SSL_NO_CERTIFICATES: the certificates cannot be used"`.
 -}
 errorToString : Error -> String
 errorToString =
